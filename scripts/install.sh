@@ -58,12 +58,10 @@ sudo systemctl enable poolex
 # 6. Sudoers : uniquement le restart du service (sans mot de passe pour le runner)
 echo ""
 echo "[6/6] Configuration sudoers (systemctl restart poolex)..."
-cat <<EOF | sudo tee /etc/sudoers.d/poolex > /dev/null
-$SERVICE_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl daemon-reload
-$SERVICE_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart poolex
-$SERVICE_USER ALL=(ALL) NOPASSWD: /usr/bin/mkdir -p /opt/poolex-control
-$SERVICE_USER ALL=(ALL) NOPASSWD: /usr/bin/chown $SERVICE_USER\:$SERVICE_USER /opt/poolex-control
-EOF
+printf '%s ALL=(ALL) NOPASSWD: /usr/bin/systemctl daemon-reload\n' "$SERVICE_USER" \
+    | sudo tee    /etc/sudoers.d/poolex > /dev/null
+printf '%s ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart poolex\n' "$SERVICE_USER" \
+    | sudo tee -a /etc/sudoers.d/poolex > /dev/null
 sudo chmod 440 /etc/sudoers.d/poolex
 
 # =============================================================================
