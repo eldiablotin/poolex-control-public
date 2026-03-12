@@ -179,7 +179,6 @@ class AnalysisSession:
         print(f"{_DIM}Appuyez sur {_R}{_B}Entrée{_R}{_DIM} pour marquer une action.{_R}")
         print(f"{_DIM}Tapez {_R}{_B}q{_R}{_DIM} + Entrée pour quitter et afficher le rapport.{_R}\n")
 
-        import threading
         stop_event = threading.Event()
 
         def _input_loop():
