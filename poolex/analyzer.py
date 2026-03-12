@@ -17,15 +17,13 @@ from __future__ import annotations
 
 import os
 import sqlite3
-import sys
-import termios
 import time
-import tty
+import threading
 from collections import deque
 from datetime import datetime
 from typing import Optional
 
-from .decoder import DDFrame, CDFrame, Frame, decode, diff, FRAME_SIZE, HEADERS
+from .decoder import DDFrame, CDFrame, Frame, decode, diff
 
 DB_PATH     = os.environ.get("POOLEX_DB_PATH", "/var/lib/poolex/poolex.db")
 POLL_INTERVAL = 0.3   # secondes entre deux lectures DB
