@@ -456,10 +456,10 @@ GET  /test/api/report    → Rapport JSON complet
 | Étape présentée à l'opérateur | `step_presented_at` |
 | Opérateur appuie sur FAIT | `operator_confirmed_at` |
 | Début de capture des trames post-action | `capture_start_at` |
-| Fin de capture (fenêtre 20s) | `capture_end_at` |
+| Fin de capture (fenêtre 2 min) | `capture_end_at` |
 
 > L'opérateur confirme **après avoir terminé** les pressions de boutons.
-> La fenêtre de capture de 20s démarre à ce moment pour laisser le temps
+> La fenêtre de capture de 2 minutes démarre à ce moment pour laisser le temps
 > à la PAC de propager le changement sur le bus RS485.
 
 ### Protocole de test initial (consigne de chauffe)
@@ -507,7 +507,7 @@ ssh poolex-rpi "curl -s http://localhost:5000/test/api/report | python3 -m json.
       "step_presented_at": "2025-08-17T17:43:15Z",
       "operator_confirmed_at": "2025-08-17T17:43:28Z",
       "operator_delay_s": 13.2,
-      "capture_window_s": 20,
+      "capture_window_s": 120,
       "frames_collected": {"DD": 20, "CD": 3, "D2": 20},
       "analysis": {
         "CD": {

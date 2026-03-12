@@ -36,7 +36,7 @@ DB_PATH = os.environ.get("POOLEX_DB_PATH", "/var/lib/poolex/poolex.db")
 # L'opérateur confirme quand il a fini d'appuyer sur les boutons,
 # mais la PAC peut prendre quelques secondes à propager sur le bus RS485.
 # On capture sur une fenêtre large pour ne rien rater.
-CAPTURE_WINDOW_S = 20   # secondes d'observation après "FAIT"
+CAPTURE_WINDOW_S = 120  # secondes d'observation après "FAIT" (2 minutes)
 CAPTURE_FRAMES_N = 10   # nombre de trames à collecter par type
 
 # ---------------------------------------------------------------------------
