@@ -6,26 +6,35 @@ on:
 
 jobs:
   deploy:
-    # Le runner tourne directement sur le Raspberry Pi
     runs-on: self-hosted
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           token: ${{ secrets.GH_PAT }}
 
-      - name: Install Python dependencies
-        run: /opt/poolex-control/venv/bin/pip install -r requirements.txt -q
-
-      - name: Deploy to /opt/poolex-control
+      - name: Deploy files to /opt/poolex-control
         run: |
-          cp -r . /opt/poolex-control/
-          echo "Fichiers déployés"
+          sudo mkdir -p /opt/poolex-control
+          sudo chown "$USER:$USER" /opt/poolex-control
+          cp -r "$GITHUB_WORKSPACE/." /opt/poolex-control/
 
-      - name: Restart service
-        run: sudo systemctl restart poolex
+      - name: Setup venv and install dependencies
+        run: |
+          if [ ! -f /opt/poolex-control/venv/bin/python ]; then
+            echo "Création du virtualenv..."
+            python3 -m venv /opt/poolex-control/venv
+          fi
+          /opt/poolex-control/venv/bin/pip install -r /opt/poolex-control/requirements.txt -q
+
+      - name: Reload systemd and restart service
+        run: |
+          sudo systemctl daemon-reload
+          sudo systemctl restart poolex
 
       - name: Verify service is running
         run: |
-          sleep 3
-          systemctl is-active poolex || (journalctl -u poolex -n 20 && exit 1)
+          sleep 5
+          systemctl is-active poolex \
+            || (echo "--- Logs du service ---" && journalctl -u poolex -n 30 --no-pager && exit 1)
