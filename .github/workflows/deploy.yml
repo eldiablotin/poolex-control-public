@@ -1,0 +1,29 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    # Le runner tourne directement sur le Raspberry Pi
+    runs-on: self-hosted
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Python dependencies
+        run: /opt/poolex-control/venv/bin/pip install -r requirements.txt -q
+
+      - name: Deploy to /opt/poolex-control
+        run: |
+          cp -r . /opt/poolex-control/
+          echo "Fichiers déployés"
+
+      - name: Restart service
+        run: sudo systemctl restart poolex
+
+      - name: Verify service is running
+        run: |
+          sleep 3
+          systemctl is-active poolex || (journalctl -u poolex -n 20 && exit 1)
