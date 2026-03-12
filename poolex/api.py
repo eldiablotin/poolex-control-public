@@ -18,6 +18,7 @@ from .capture import RS485Capture
 from .controller import Controller
 from .decoder import CDFrame, DDFrame
 from .storage import Storage
+from .test_protocol import bp as test_bp
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,7 @@ DB_PATH     = os.environ.get("POOLEX_DB_PATH",     "/var/lib/poolex/poolex.db")
 API_PORT    = int(os.environ.get("POOLEX_API_PORT", "5000"))
 
 app = Flask(__name__)
+app.register_blueprint(test_bp)
 
 # -- Initialisation des composants ------------------------------------------
 # L'ordre est important : storage d'abord, puis capture avec callback,
