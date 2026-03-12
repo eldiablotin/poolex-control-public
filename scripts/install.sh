@@ -5,6 +5,9 @@
 # =============================================================================
 set -euo pipefail
 
+# Répertoire racine du repo, indépendamment d'où le script est lancé
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
 REPO_URL="https://github.com/eldiablotin/poolex-control"
 DEPLOY_DIR="/opt/poolex-control"
 DATA_DIR="/var/lib/poolex"
@@ -39,15 +42,15 @@ echo ""
 echo "[4/6] Création du virtualenv et installation des dépendances..."
 python3 -m venv "$DEPLOY_DIR/venv"
 "$DEPLOY_DIR/venv/bin/pip" install --upgrade pip -q
-"$DEPLOY_DIR/venv/bin/pip" install -r requirements.txt -q
+"$DEPLOY_DIR/venv/bin/pip" install -r "$REPO_DIR/requirements.txt" -q
 
 # Déploiement initial des fichiers
-cp -r . "$DEPLOY_DIR/"
+cp -r "$REPO_DIR/." "$DEPLOY_DIR/"
 
 # 5. Service systemd
 echo ""
 echo "[5/6] Installation du service systemd..."
-sed "s/__SERVICE_USER__/$SERVICE_USER/" scripts/poolex.service \
+sed "s/__SERVICE_USER__/$SERVICE_USER/" "$REPO_DIR/scripts/poolex.service" \
     | sudo tee /etc/systemd/system/poolex.service > /dev/null
 sudo systemctl daemon-reload
 sudo systemctl enable poolex
