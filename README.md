@@ -8,13 +8,13 @@ en utilisant un Raspberry Pi 4 et un adaptateur USB-RS485.
 ## Table des matières
 
 1. [Matériel requis](#1-matériel-requis)
-8. [Protocole de test guidé](#8-protocole-de-test-guidé)
 2. [Protocole RS485 — ce qu'on a appris](#2-protocole-rs485--ce-quon-a-appris)
 3. [Architecture logicielle](#3-architecture-logicielle)
 4. [Installation sur le Raspberry Pi](#4-installation-sur-le-raspberry-pi)
 5. [Mise en place GitHub Actions](#5-mise-en-place-github-actions)
 6. [Utilisation de l'API](#6-utilisation-de-lapi)
 7. [Dépannage](#7-dépannage)
+8. [Protocole de test guidé](#8-protocole-de-test-guidé)
 
 ---
 
@@ -103,7 +103,9 @@ poolex-control/
 │   ├── capture.py      # Lecture série en thread, retry automatique si port absent
 │   ├── storage.py      # Stockage SQLite (schéma BLOB, 1 ligne par trame)
 │   ├── controller.py   # Injection de trames CD modifiées
-│   └── api.py          # API REST Flask
+│   ├── api.py          # API REST Flask
+│   ├── analyzer.py     # Analyseur CLI temps réel (diff coloré)
+│   └── test_protocol.py # Interface web de test guidé
 ├── tests/
 │   ├── test_decoder.py
 │   └── test_controller.py
@@ -223,6 +225,19 @@ systemctl status poolex
 curl http://localhost:5000/status
 curl http://localhost:5000/frames/stats
 ```
+
+### Accès réseau — hostname mDNS
+
+Le RPi est accessible via son nom d'hôte sur tout réseau local, **sans configuration IP** :
+
+```
+http://raspberrypi4.local:5000/     # API et interface web
+ssh pi@raspberrypi4.local           # SSH direct
+```
+
+> `avahi-daemon` est actif par défaut sur Debian. L'adresse `.local` fonctionne
+> sur Windows 10/11, macOS, Linux et Android/iOS sans installation supplémentaire.
+> L'IP DHCP peut changer, le hostname reste stable.
 
 ### Variables d'environnement (optionnel)
 
@@ -443,7 +458,7 @@ POST /test/api/next_step → Interface affiche : "Appuyez 1x sur ▲"
                            Opérateur appuie sur la télécommande PAC
                            Opérateur appuie sur FAIT
                            → Timestamp précis enregistré
-                           → Capture RS485 pendant 20s
+                           → Capture RS485 pendant 2 min
                            → Analyse des bytes changés
 POST /test/api/next_step → Étape suivante...
 GET  /test/api/report    → Rapport JSON complet
