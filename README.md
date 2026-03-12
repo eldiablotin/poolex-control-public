@@ -302,7 +302,7 @@ L'API écoute sur le port 5000 du RPi (accessible sur le réseau local).
 Retourne le dernier état décodé de la PAC.
 
 ```bash
-curl http://192.168.1.63:5000/status
+curl http://raspberrypi4.local:5000/status
 ```
 
 ```json
@@ -327,16 +327,16 @@ curl http://192.168.1.63:5000/status
 
 ```bash
 # 20 dernières trames de tous types
-curl http://192.168.1.63:5000/frames
+curl http://raspberrypi4.local:5000/frames
 
 # Filtrer par type
-curl "http://192.168.1.63:5000/frames?header=DD&limit=5"
+curl "http://raspberrypi4.local:5000/frames?header=DD&limit=5"
 ```
 
 ### GET /frames/stats
 
 ```bash
-curl http://192.168.1.63:5000/frames/stats
+curl http://raspberrypi4.local:5000/frames/stats
 ```
 
 ```json
@@ -350,7 +350,7 @@ Envoie une nouvelle consigne de température (10–40°C).
 > ⚠️ Nécessite que `controller_ready` soit `true` (une trame CD doit avoir été reçue).
 
 ```bash
-curl -X POST http://192.168.1.63:5000/control/setpoint \
+curl -X POST http://raspberrypi4.local:5000/control/setpoint \
      -H "Content-Type: application/json" \
      -d '{"temperature": 28}'
 ```
@@ -474,7 +474,7 @@ GET  /test/api/report    → Rapport JSON complet
 
 ### Lancer une session
 
-**Opérateur** : ouvrir `http://192.168.1.17:5000/test` sur téléphone ou PC.
+**Opérateur** : ouvrir `http://raspberrypi4.local:5000/test` sur téléphone ou PC.
 
 **Claude (via SSH)** :
 
