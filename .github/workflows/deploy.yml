@@ -15,7 +15,9 @@ jobs:
           token: ${{ secrets.GH_PAT }}
 
       - name: Deploy files to /opt/poolex-control
-        run: cp -r "$GITHUB_WORKSPACE/." /opt/poolex-control/
+        run: |
+          find "$GITHUB_WORKSPACE" -maxdepth 1 -mindepth 1 ! -name '.git' \
+            -exec cp -r {} /opt/poolex-control/ \;
 
       - name: Setup venv and install dependencies
         run: |
