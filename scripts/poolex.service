@@ -11,7 +11,8 @@ Environment="POOLEX_DB_PATH=/var/lib/poolex/poolex.db"
 Environment="POOLEX_API_PORT=5000"
 ExecStart=/opt/poolex-control/venv/bin/python -m poolex
 Restart=on-failure
-RestartSec=5s
+RestartSec=15s
+StartLimitIntervalSec=0
 StandardOutput=journal
 StandardError=journal
 

@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 # Timeout inter-octet : à 9600 baud 1 octet ≈ 1 ms, donc 50 ms détecte
 # une coupure de trame sans ambiguïté.
 INTER_BYTE_TIMEOUT = 0.05  # secondes
+PORT_RETRY_DELAY   = 10    # secondes entre deux tentatives d'ouverture du port
 
 
 class RS485Capture:
@@ -45,20 +46,34 @@ class RS485Capture:
     # ------------------------------------------------------------------ #
 
     def start(self) -> None:
-        self._serial = serial.Serial(
-            port=self.port,
-            baudrate=self.baudrate,
-            bytesize=serial.EIGHTBITS,
-            parity=serial.PARITY_NONE,
-            stopbits=serial.STOPBITS_ONE,
-            timeout=INTER_BYTE_TIMEOUT,
-        )
+        """Démarre le thread de capture. Ne plante pas si le port est absent :
+        le thread réessaiera toutes les PORT_RETRY_DELAY secondes."""
         self._running = True
         self._thread = threading.Thread(
             target=self._read_loop, daemon=True, name="rs485-capture"
         )
         self._thread.start()
-        logger.info("Capture démarrée sur %s à %d baud", self.port, self.baudrate)
+        logger.info("Thread de capture démarré (port cible : %s)", self.port)
+
+    def _open_port(self) -> bool:
+        """Tente d'ouvrir le port série. Retourne True si succès."""
+        try:
+            self._serial = serial.Serial(
+                port=self.port,
+                baudrate=self.baudrate,
+                bytesize=serial.EIGHTBITS,
+                parity=serial.PARITY_NONE,
+                stopbits=serial.STOPBITS_ONE,
+                timeout=INTER_BYTE_TIMEOUT,
+            )
+            logger.info("Port %s ouvert à %d baud", self.port, self.baudrate)
+            return True
+        except serial.SerialException as e:
+            logger.warning(
+                "Port %s indisponible, nouvelle tentative dans %ds : %s",
+                self.port, PORT_RETRY_DELAY, e,
+            )
+            return False
 
     def stop(self) -> None:
         self._running = False
@@ -104,10 +119,28 @@ class RS485Capture:
         in_frame = False
 
         while self._running:
-            byte = self._serial.read(1)
+
+            # --- Ouverture du port (avec retry si absent) ---
+            if not self._serial or not self._serial.is_open:
+                if not self._open_port():
+                    time.sleep(PORT_RETRY_DELAY)
+                    continue
+                buf.clear()
+                in_frame = False
+
+            # --- Lecture d'un octet ---
+            try:
+                byte = self._serial.read(1)
+            except serial.SerialException as e:
+                logger.error("Erreur série, reconnexion : %s", e)
+                self._serial.close()
+                self._serial = None
+                buf.clear()
+                in_frame = False
+                continue
 
             if not byte:
-                # Timeout → aucun octet reçu depuis INTER_BYTE_TIMEOUT
+                # Timeout inter-octet → trame incomplète abandonnée
                 if in_frame and buf:
                     logger.debug(
                         "Trame incomplète abandonnée (%d octets, header=0x%02X)",
