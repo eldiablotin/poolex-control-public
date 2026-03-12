@@ -32,6 +32,13 @@ bp = Blueprint("test", __name__)
 
 DB_PATH = os.environ.get("POOLEX_DB_PATH", "/var/lib/poolex/poolex.db")
 
+# Durée de capture des trames APRÈS confirmation de l'opérateur.
+# L'opérateur confirme quand il a fini d'appuyer sur les boutons,
+# mais la PAC peut prendre quelques secondes à propager sur le bus RS485.
+# On capture sur une fenêtre large pour ne rien rater.
+CAPTURE_WINDOW_S = 20   # secondes d'observation après "FAIT"
+CAPTURE_FRAMES_N = 10   # nombre de trames à collecter par type
+
 # ---------------------------------------------------------------------------
 #  Définition du protocole de test
 # ---------------------------------------------------------------------------
@@ -51,28 +58,44 @@ TEST_STEPS: list[dict] = [
     {
         "id": 1,
         "label": "Consigne +1°C",
-        "instruction": "Augmentez la consigne de chauffe de 1°C sur la télécommande.",
+        "instruction": (
+            "Appuyez 1 fois sur le bouton ▲ de la télécommande pour augmenter\n"
+            "la consigne de chauffe de 1°C.\n\n"
+            "Attendez que la valeur soit affichée, puis appuyez sur FAIT."
+        ),
         "requires_input": False,
         "delta": +1,
     },
     {
         "id": 2,
         "label": "Consigne +2°C",
-        "instruction": "Augmentez à nouveau la consigne de 2°C supplémentaires.",
+        "instruction": (
+            "Appuyez 2 fois sur le bouton ▲ pour augmenter la consigne de 2°C\n"
+            "supplémentaires.\n\n"
+            "Attendez que la valeur soit stable, puis appuyez sur FAIT."
+        ),
         "requires_input": False,
         "delta": +2,
     },
     {
         "id": 3,
         "label": "Consigne −2°C",
-        "instruction": "Redescendez la consigne de 2°C.",
+        "instruction": (
+            "Appuyez 2 fois sur le bouton ▼ pour redescendre la consigne de 2°C.\n\n"
+            "Attendez que la valeur soit stable, puis appuyez sur FAIT."
+        ),
         "requires_input": False,
         "delta": -2,
     },
     {
         "id": 4,
         "label": "Consigne −1°C",
-        "instruction": "Redescendez la consigne de 1°C pour revenir à la valeur initiale.",
+        "instruction": (
+            "Appuyez 1 fois sur le bouton ▼ pour redescendre la consigne de 1°C\n"
+            "et revenir à la valeur de départ.\n\n"
+            "Vérifiez que la consigne affichée est bien la valeur initiale,\n"
+            "puis appuyez sur FAIT."
+        ),
         "requires_input": False,
         "delta": -1,
     },
@@ -118,32 +141,57 @@ def _last_frames() -> dict[str, dict]:
     return result
 
 
-def _frames_after(min_ids: dict[str, int], wait_s: float = 8.0) -> dict[str, dict]:
+def _frames_after(min_ids: dict[str, int],
+                  wait_s: float = CAPTURE_WINDOW_S,
+                  n: int = CAPTURE_FRAMES_N) -> dict[str, dict]:
     """
-    Attend jusqu'à wait_s secondes puis retourne les nouvelles trames
-    arrivées après les IDs donnés.
+    Collecte les nouvelles trames pendant wait_s secondes après confirmation.
+
+    On attend toute la fenêtre (pas de break anticipé) pour capturer
+    l'évolution complète : la PAC peut mettre plusieurs secondes à propager
+    le changement de consigne sur le bus RS485 après les pressions de boutons.
+
+    Retourne pour chaque header :
+      - first : première trame arrivée (réaction immédiate)
+      - last  : dernière trame arrivée (état stabilisé)
+      - count : nombre de trames reçues pendant la fenêtre
     """
     deadline = time.monotonic() + wait_s
-    result: dict[str, dict] = {}
+    collected: dict[str, list[dict]] = {h: [] for h in ("DD", "D2", "CC", "CD")}
+
     while time.monotonic() < deadline:
         try:
             conn = sqlite3.connect(DB_PATH)
             for header in ("DD", "D2", "CC", "CD"):
                 min_id = min_ids.get(header, 0)
-                row = conn.execute(
-                    "SELECT id, raw FROM frames WHERE header=? AND id>? ORDER BY id DESC LIMIT 1",
-                    (header, min_id),
-                ).fetchone()
-                if row:
-                    frame = decode(row[1])
+                if collected[header]:
+                    min_id = max(min_id, collected[header][-1]["db_id"])
+                rows = conn.execute(
+                    "SELECT id, raw, timestamp FROM frames "
+                    "WHERE header=? AND id>? ORDER BY id LIMIT ?",
+                    (header, min_id, n),
+                ).fetchall()
+                for row_id, raw, ts in rows:
+                    frame = decode(raw)
                     if frame:
-                        result[header] = {"db_id": row[0], "frame": frame}
+                        collected[header].append(
+                            {"db_id": row_id, "frame": frame, "captured_at": ts}
+                        )
             conn.close()
         except Exception:
             pass
-        if "DD" in result:   # on a au moins une trame DD fraîche
-            break
-        time.sleep(0.5)
+        time.sleep(1.0)
+
+    result: dict[str, dict] = {}
+    for header, frames in collected.items():
+        if frames:
+            result[header] = {
+                "db_id":  frames[-1]["db_id"],   # dernier = état stabilisé
+                "frame":  frames[-1]["frame"],
+                "first":  frames[0],
+                "last":   frames[-1],
+                "count":  len(frames),
+            }
     return result
 
 
@@ -205,12 +253,14 @@ def api_state():
 def api_start():
     """Démarre une nouvelle session (appelé par Claude via SSH)."""
     with _lock:
+        now = datetime.now(timezone.utc).isoformat()
         _session.update({
             "active": True,
             "step_index": 0,
             "baseline": {},
             "events": [],
-            "started_at": datetime.now(timezone.utc).isoformat(),
+            "started_at": now,
+            "step_presented_at": now,
             "waiting_confirm": True,
             "snapshot_before": _last_frames(),
         })
@@ -231,11 +281,17 @@ def api_confirm():
         idx = _session["step_index"]
         step = TEST_STEPS[idx]
 
+        step_presented_at = _session.get("step_presented_at", ts)
         event: dict = {
-            "step_id":    step["id"],
-            "label":      step["label"],
-            "confirmed_at": ts,
-            "delta":      step["delta"],
+            "step_id":          step["id"],
+            "label":            step["label"],
+            "delta":            step["delta"],
+            "step_presented_at": step_presented_at,   # quand Claude a avancé l'étape
+            "operator_confirmed_at": ts,              # quand l'opérateur a appuyé sur FAIT
+            "operator_delay_s": round(
+                (datetime.fromisoformat(ts) -
+                 datetime.fromisoformat(step_presented_at)).total_seconds(), 1
+            ),
         }
 
         if step["requires_input"]:
@@ -248,7 +304,6 @@ def api_confirm():
             _session["baseline"] = baseline
             event["baseline"] = baseline
         else:
-            # Collecter les trames après l'action
             before = _session["snapshot_before"]
             before_ids = {h: v["db_id"] for h, v in before.items()}
 
@@ -256,12 +311,20 @@ def api_confirm():
 
         # Analyse asynchrone pour les étapes avec action physique
         if not step["requires_input"]:
+            capture_start = datetime.now(timezone.utc).isoformat()
+
             def _do_analysis():
                 after = _frames_after(before_ids)
                 analysis = _analyze(before, after)
+                capture_end = datetime.now(timezone.utc).isoformat()
                 with _lock:
-                    event["analysis"] = analysis
-                    event["frames_after_count"] = {h: 1 for h in after}
+                    event["analysis"]          = analysis
+                    event["capture_start_at"]  = capture_start
+                    event["capture_end_at"]    = capture_end
+                    event["capture_window_s"]  = CAPTURE_WINDOW_S
+                    event["frames_collected"]  = {
+                        h: d["count"] for h, d in after.items()
+                    }
                     _session["events"].append(event)
 
             threading.Thread(target=_do_analysis, daemon=True).start()
@@ -288,6 +351,7 @@ def api_next_step():
         _session["step_index"] = next_idx
         _session["snapshot_before"] = _last_frames()
         _session["waiting_confirm"] = True
+        _session["step_presented_at"] = datetime.now(timezone.utc).isoformat()
 
         return jsonify({"status": "next", "step": TEST_STEPS[next_idx]})
 

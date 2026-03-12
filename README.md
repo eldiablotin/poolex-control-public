@@ -8,6 +8,7 @@ en utilisant un Raspberry Pi 4 et un adaptateur USB-RS485.
 ## Table des matières
 
 1. [Matériel requis](#1-matériel-requis)
+8. [Protocole de test guidé](#8-protocole-de-test-guidé)
 2. [Protocole RS485 — ce qu'on a appris](#2-protocole-rs485--ce-quon-a-appris)
 3. [Architecture logicielle](#3-architecture-logicielle)
 4. [Installation sur le Raspberry Pi](#4-installation-sur-le-raspberry-pi)
@@ -423,3 +424,97 @@ exit
 ```
 
 > ⚠️ Ne jamais mettre `user:group` dans sudoers — le caractère `:` est réservé et provoque une erreur de syntaxe.
+
+---
+
+## 8. Protocole de test guidé
+
+Interface web permettant de conduire des tests provoqués pour valider le décodage
+des trames RS485 par corrélation action physique → changement de bytes.
+
+### Architecture de la session
+
+```
+Claude (SSH)          Opérateur (téléphone/PC près de la PAC)
+─────────────         ──────────────────────────────────────
+POST /test/api/start  →  Interface affiche l'étape 0 (relevé initial)
+                         Opérateur saisit les valeurs et confirme
+POST /test/api/next_step → Interface affiche : "Appuyez 1x sur ▲"
+                           Opérateur appuie sur la télécommande PAC
+                           Opérateur appuie sur FAIT
+                           → Timestamp précis enregistré
+                           → Capture RS485 pendant 20s
+                           → Analyse des bytes changés
+POST /test/api/next_step → Étape suivante...
+GET  /test/api/report    → Rapport JSON complet
+```
+
+### Modèle de timing
+
+| Événement | Timestamp enregistré |
+|-----------|----------------------|
+| Étape présentée à l'opérateur | `step_presented_at` |
+| Opérateur appuie sur FAIT | `operator_confirmed_at` |
+| Début de capture des trames post-action | `capture_start_at` |
+| Fin de capture (fenêtre 20s) | `capture_end_at` |
+
+> L'opérateur confirme **après avoir terminé** les pressions de boutons.
+> La fenêtre de capture de 20s démarre à ce moment pour laisser le temps
+> à la PAC de propager le changement sur le bus RS485.
+
+### Protocole de test initial (consigne de chauffe)
+
+| Étape | Action demandée | Appuis bouton |
+|-------|----------------|---------------|
+| 0 | Relevé baseline (temp ext, eau, consigne affichés) | — |
+| 1 | Consigne +1°C | 1× bouton ▲ |
+| 2 | Consigne +2°C supplémentaires | 2× bouton ▲ |
+| 3 | Consigne −2°C | 2× bouton ▼ |
+| 4 | Consigne −1°C (retour initial) | 1× bouton ▼ |
+
+### Lancer une session
+
+**Opérateur** : ouvrir `http://192.168.1.17:5000/test` sur téléphone ou PC.
+
+**Claude (via SSH)** :
+
+```bash
+# 1. Démarrer la session
+ssh poolex-rpi "curl -s -X POST http://localhost:5000/test/api/start | python3 -m json.tool"
+
+# 2. Avancer après confirmation de l'opérateur (répéter pour chaque étape)
+ssh poolex-rpi "curl -s -X POST http://localhost:5000/test/api/next_step | python3 -m json.tool"
+
+# 3. Lire le rapport final (corrélations action → bytes RS485)
+ssh poolex-rpi "curl -s http://localhost:5000/test/api/report | python3 -m json.tool"
+```
+
+### Format du rapport
+
+```json
+{
+  "started_at": "2025-08-17T17:43:00Z",
+  "baseline": {
+    "temp_ext_display": 25,
+    "temp_eau_display": 28,
+    "consigne_display": 27
+  },
+  "events": [
+    {
+      "step_id": 1,
+      "label": "Consigne +1°C",
+      "delta": 1,
+      "step_presented_at": "2025-08-17T17:43:15Z",
+      "operator_confirmed_at": "2025-08-17T17:43:28Z",
+      "operator_delay_s": 13.2,
+      "capture_window_s": 20,
+      "frames_collected": {"DD": 20, "CD": 3, "D2": 20},
+      "analysis": {
+        "CD": {
+          "11": {"before": 27, "after": 28, "hex_before": "0x1B", "hex_after": "0x1C"}
+        }
+      }
+    }
+  ]
+}
+```
