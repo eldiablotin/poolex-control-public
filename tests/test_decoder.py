@@ -1,4 +1,3 @@
-import pytest
 from poolex.decoder import (
     FRAME_SIZE,
     CDFrame,
