@@ -232,7 +232,7 @@ Le RPi est accessible via son nom d'hôte sur tout réseau local, **sans configu
 
 ```
 http://raspberrypi4.local:5000/     # API et interface web
-ssh pi@raspberrypi4.local           # SSH direct
+ssh pi@raspberrypi4.local   ou sans .local        # SSH direct
 ```
 
 > `avahi-daemon` est actif par défaut sur Debian. L'adresse `.local` fonctionne
