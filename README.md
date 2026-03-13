@@ -385,23 +385,126 @@ curl -X POST http://localhost:5000/control/setpoint \
 
 ## 7. Dépannage
 
-### Le port /dev/ttyUSB0 n'apparaît pas
+### Diagnostic complet — port /dev/ttyUSB0
+
+Suivre les étapes dans l'ordre. S'arrêter dès qu'une étape révèle le problème.
+
+#### Étape 1 — L'adaptateur est-il vu par le système USB ?
 
 ```bash
-# Vérifier que l'adaptateur est reconnu en USB
 lsusb | grep -i ftdi
-
-# Vérifier le module kernel
-dmesg | grep ttyUSB
-
-# Vérifier les permissions
-ls -la /dev/ttyUSB0
-# doit afficher : crw-rw---- ... dialout ...
-
-# Vérifier que l'utilisateur est dans le groupe dialout
-groups
-# doit contenir : dialout
+# Attendu : Bus 00X Device 00Y: ID 0403:6001 Future Technology Devices International, Ltd FT232 Serial (UART) IC
 ```
+
+Si rien n'apparaît : vérifier le câble USB, essayer un autre port USB du RPi.
+
+#### Étape 2 — Le kernel a-t-il créé le nœud série ?
+
+```bash
+ls /dev/ttyUSB* 2>/dev/null || echo "Aucun ttyUSB présent"
+dmesg | grep -E "ttyUSB|ftdi|FTDI|FT232" | tail -20
+```
+
+Sortie normale au branchement :
+```
+usb 1-1.2: new full-speed USB device number 3 using xhci_hcd
+usb 1-1.2: New USB device found, idVendor=0403, idProduct=6001
+ftdi_sio 1-1.2:1.0: FTDI USB Serial Device converter detected
+usb 1-1.2: FTDI USB Serial Device converter now attached to ttyUSB0
+```
+
+Si `attached to ttyUSB0` est suivi de `disconnected` : voir **Étape 3 (brltty)**.
+
+#### Étape 3 — brltty vole-t-il le port ? (cause #1 sur Debian)
+
+`brltty` (daemon braille) reconnaît les puces FTDI et les débranche immédiatement.
+
+```bash
+# Détecter la présence de brltty
+systemctl status brltty 2>/dev/null || echo "brltty absent"
+dmesg | grep -i brltty | tail -5
+```
+
+Si brltty est actif ou visible dans dmesg → le supprimer définitivement :
+
+```bash
+sudo systemctl stop brltty
+sudo systemctl disable brltty
+sudo apt remove --purge brltty -y
+
+# Débrancher puis rebrancher l'adaptateur USB
+ls /dev/ttyUSB*
+# Doit afficher : /dev/ttyUSB0
+```
+
+#### Étape 4 — Permissions du nœud
+
+```bash
+ls -la /dev/ttyUSB0
+# Attendu : crw-rw---- 1 root dialout ... /dev/ttyUSB0
+
+groups pi
+# Doit contenir : dialout
+```
+
+Si `pi` n'est pas dans `dialout` :
+
+```bash
+sudo usermod -a -G dialout pi
+# Déconnecter / reconnecter la session SSH pour que le groupe prenne effet
+```
+
+#### Étape 5 — Le port est-il déjà utilisé par un autre process ?
+
+```bash
+lsof /dev/ttyUSB0 2>/dev/null
+# Si une ligne apparaît : un autre process tient le port
+```
+
+Cas courant : le service `poolex` est déjà en cours et bloque le port pour un test manuel.
+
+```bash
+sudo systemctl stop poolex
+# Puis relancer le test manuel
+```
+
+#### Étape 6 — Test de lecture brute (validation end-to-end)
+
+Vérifie que des octets arrivent réellement depuis le bus RS485 :
+
+```bash
+# Lecture brute pendant 5 secondes (9600 baud 8N1)
+timeout 5 cat /dev/ttyUSB0 | xxd | head -20
+```
+
+Si des octets apparaissent : la capture fonctionne, le problème est logiciel.
+Si rien n'apparaît mais que le port existe : vérifier le branchement A+/B- et le switch 120Ω (doit être OFF).
+
+#### Étape 7 — Test avec pyserial en direct
+
+```bash
+/opt/poolex-control/venv/bin/python3 - <<'EOF'
+import serial, time
+s = serial.Serial('/dev/ttyUSB0', 9600, timeout=2)
+print("Port ouvert :", s.name)
+data = s.read(80)
+print(f"Octets reçus : {len(data)}")
+if data:
+    print("Premier octet (header) :", hex(data[0]))
+s.close()
+EOF
+```
+
+#### Récapitulatif des causes fréquentes
+
+| Symptôme | Cause probable | Solution |
+|----------|---------------|----------|
+| `lsusb` vide | Câble ou port USB défaillant | Changer câble / port |
+| `ttyUSB0` crée puis disparaît | `brltty` vole l'adaptateur | `apt remove brltty` |
+| `Permission denied` | `pi` hors groupe `dialout` | `usermod -a -G dialout pi` |
+| `lsof` montre un process | Port déjà ouvert | Arrêter le service `poolex` |
+| Port OK, 0 octets reçus | Branchement A+/B- inversé ou switch 120Ω ON | Vérifier câblage |
+| Octets reçus, trames invalides | Baud rate ou câblage bruit | Vérifier 9600 baud, longueur câble |
 
 ### Le service ne démarre pas
 
