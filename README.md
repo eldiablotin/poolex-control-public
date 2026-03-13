@@ -222,8 +222,8 @@ API démarrée sur le port 5000
 systemctl status poolex
 
 # Tester l'API
-curl http://localhost:5000/status
-curl http://localhost:5000/frames/stats
+curl http://raspberrypi4:5000/status
+curl http://raspberrypi4:5000/frames/stats
 ```
 
 ### Accès réseau — hostname mDNS
@@ -238,8 +238,8 @@ ssh pi@raspberrypi4     # SSH direct (mDNS géré par avahi-daemon)
 > sur Windows 10/11, macOS et Linux sans configuration IP.
 > L'IP DHCP peut changer, le hostname reste stable.
 
-> ℹ️ L'API Flask (port 5000) est liée à `localhost` — elle n'est **pas** accessible
-> directement depuis le PC. Utiliser un tunnel SSH ou les commandes `curl` depuis le RPi.
+> ℹ️ L'API Flask écoute sur `0.0.0.0:5000` — accessible depuis le PC via `http://raspberrypi4:5000/status`.
+> La route `/` (racine) retourne la liste des endpoints disponibles.
 
 ### Variables d'environnement (optionnel)
 
@@ -312,11 +312,11 @@ Push → CI (lint + tests) → Deploy sur RPi → Restart service
 
 ## 6. Utilisation de l'API
 
-L'API écoute sur `localhost:5000` du RPi. Pour l'interroger depuis un PC, utiliser SSH :
+L'API écoute sur `0.0.0.0:5000` — accessible depuis tout le réseau local.
 
-```bash
-# Exemples à exécuter via SSH sur le RPi, ou en tunnel SSH
-ssh poolex-rpi "curl -s http://localhost:5000/status"
+```
+http://raspberrypi4:5000/       → liste des endpoints
+http://raspberrypi4:5000/status → état de la PAC
 ```
 
 ### GET /status
@@ -324,7 +324,7 @@ ssh poolex-rpi "curl -s http://localhost:5000/status"
 Retourne le dernier état décodé de la PAC.
 
 ```bash
-curl http://localhost:5000/status
+curl http://raspberrypi4:5000/status
 ```
 
 ```json
@@ -349,16 +349,16 @@ curl http://localhost:5000/status
 
 ```bash
 # 20 dernières trames de tous types
-curl http://localhost:5000/frames
+curl http://raspberrypi4:5000/frames
 
 # Filtrer par type
-curl "http://localhost:5000/frames?header=DD&limit=5"
+curl "http://raspberrypi4:5000/frames?header=DD&limit=5"
 ```
 
 ### GET /frames/stats
 
 ```bash
-curl http://localhost:5000/frames/stats
+curl http://raspberrypi4:5000/frames/stats
 ```
 
 ```json
@@ -372,7 +372,7 @@ Envoie une nouvelle consigne de température (10–40°C).
 > ⚠️ Nécessite que `controller_ready` soit `true` (une trame CD doit avoir été reçue).
 
 ```bash
-curl -X POST http://localhost:5000/control/setpoint \
+curl -X POST http://raspberrypi4:5000/control/setpoint \
      -H "Content-Type: application/json" \
      -d '{"temperature": 28}'
 ```
@@ -599,7 +599,7 @@ GET  /test/api/report    → Rapport JSON complet
 
 ### Lancer une session
 
-**Opérateur** : ouvrir `http://localhost:5000/test` sur le RPi, ou via tunnel SSH depuis un PC.
+**Opérateur** : ouvrir `http://raspberrypi4:5000/test` sur téléphone ou PC.
 
 **Claude (via SSH)** :
 

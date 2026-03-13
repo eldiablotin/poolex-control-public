@@ -46,6 +46,14 @@ controller = Controller(capture)   # enveloppe _on_frame et intercepte les CD
 #  Routes
 # ---------------------------------------------------------------------------
 
+@app.get("/")
+def index():
+    return jsonify({
+        "service": "poolex-control",
+        "endpoints": ["/status", "/frames", "/frames/stats", "/control/setpoint"],
+    })
+
+
 @app.get("/status")
 def status():
     last_dd = storage.last("DD")
