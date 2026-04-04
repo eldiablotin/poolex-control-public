@@ -16,7 +16,7 @@ import os
 from flask import Flask, jsonify, request
 
 from .capture import RS485Capture
-from .controller import Controller
+from .controller import Controller, MODES
 from .decoder import DDFrame
 from .storage import Storage
 from .test_protocol import bp as test_bp
@@ -64,6 +64,7 @@ def status():
         "pac_mode":         last_dd.mode_byte  if isinstance(last_dd, DDFrame) else None,
         "setpoint":         controller.setpoint,
         "power":            controller.power,
+        "mode":             controller.mode,
         "controller_ready": controller.ready,
     })
 
@@ -102,6 +103,21 @@ def set_setpoint():
         return jsonify({"error": "Contrôleur pas encore prêt (templates D2/CC non capturés)"}), 503
 
     return jsonify({"status": "ok", "temperature": temp})
+
+
+@app.post("/control/mode")
+def set_mode():
+    body = request.get_json(silent=True) or {}
+    mode = body.get("mode")
+
+    if mode not in MODES:
+        return jsonify({"error": f"Mode invalide. Valeurs : {list(MODES)}"}), 400
+
+    ok = controller.set_mode(mode)
+    if not ok:
+        return jsonify({"error": "Contrôleur pas encore prêt"}), 503
+
+    return jsonify({"status": "ok", "mode": mode})
 
 
 @app.post("/control/power")
