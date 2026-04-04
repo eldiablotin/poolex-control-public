@@ -7,6 +7,7 @@ Endpoints :
   GET  /frames/stats                    → comptage par type
   POST /control/setpoint {"temperature": 28}   → change la consigne °C
   POST /control/power    {"state": "on"/"off"} → allume / éteint la PAC
+  POST /control/mode     {"mode": "inverter"}  → change le mode de chauffe
 """
 from __future__ import annotations
 
@@ -18,6 +19,7 @@ from flask import Flask, jsonify, request
 from .capture import RS485Capture
 from .controller import Controller, MODES
 from .decoder import DDFrame
+from .mqtt import MQTTClient
 from .storage import Storage
 from .test_protocol import bp as test_bp
 
@@ -41,6 +43,7 @@ def _on_frame(frame):
 
 capture    = RS485Capture(port=SERIAL_PORT, on_frame=_on_frame)
 controller = Controller(capture, storage=storage)   # réactif sur D2 de la PAC, commande via CD
+mqtt_client = MQTTClient(controller, storage)
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +105,7 @@ def set_setpoint():
     if not ok:
         return jsonify({"error": "Contrôleur pas encore prêt (templates D2/CC non capturés)"}), 503
 
+    mqtt_client.publish_status()
     return jsonify({"status": "ok", "temperature": temp})
 
 
@@ -117,6 +121,7 @@ def set_mode():
     if not ok:
         return jsonify({"error": "Contrôleur pas encore prêt"}), 503
 
+    mqtt_client.publish_status()
     return jsonify({"status": "ok", "mode": mode})
 
 
@@ -132,6 +137,7 @@ def set_power():
     if not ok:
         return jsonify({"error": "Contrôleur pas encore prêt (templates D2/CC non capturés)"}), 503
 
+    mqtt_client.publish_status()
     return jsonify({"status": "ok", "power": state})
 
 
@@ -142,5 +148,6 @@ def set_power():
 def run() -> None:
     capture.start()
     controller.start()
+    mqtt_client.start()
     logger.info("API démarrée sur le port %d", API_PORT)
     app.run(host="0.0.0.0", port=API_PORT, debug=False, use_reloader=False)

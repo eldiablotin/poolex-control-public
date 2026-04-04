@@ -1,6 +1,6 @@
 # Poolex Control
 
-Capture et contrôle d'une pompe à chaleur de piscine via son bus RS485,
+Contrôle complet d'une pompe à chaleur de piscine via son bus RS485,
 en utilisant un Raspberry Pi 4 et un adaptateur USB-RS485.
 
 ---
@@ -8,13 +8,13 @@ en utilisant un Raspberry Pi 4 et un adaptateur USB-RS485.
 ## Table des matières
 
 1. [Matériel requis](#1-matériel-requis)
-2. [Protocole RS485 — ce qu'on a appris](#2-protocole-rs485--ce-quon-a-appris)
-3. [Architecture logicielle](#3-architecture-logicielle)
-4. [Installation sur le Raspberry Pi](#4-installation-sur-le-raspberry-pi)
-5. [Mise en place GitHub Actions](#5-mise-en-place-github-actions)
-6. [Utilisation de l'API](#6-utilisation-de-lapi)
-7. [Dépannage](#7-dépannage)
-8. [Protocole de test guidé](#8-protocole-de-test-guidé)
+2. [Protocole RS485 — modèle complet](#2-protocole-rs485--modèle-complet)
+3. [Méthodologie de reverse engineering](#3-méthodologie-de-reverse-engineering)
+4. [Architecture logicielle](#4-architecture-logicielle)
+5. [Installation sur le Raspberry Pi](#5-installation-sur-le-raspberry-pi)
+6. [Mise en place GitHub Actions](#6-mise-en-place-github-actions)
+7. [Utilisation de l'API](#7-utilisation-de-lapi)
+8. [Dépannage](#8-dépannage)
 
 ---
 
@@ -35,16 +35,19 @@ Adaptateur Waveshare          Bus RS485 PAC
 TX_A  ─────────────────────►  Borne A+
 RX_B  ◄─────────────────────  Borne B-
 GND   ─────────────────────── Masse (optionnel)
-
-Switch 120Ω → OFF  (branchement en parallèle, pas en terminaison)
 ```
 
-> ⚠️ Le module se branche **en parallèle** sur les fils de la télécommande filaire.
-> Ne pas couper le câble existant. Ne pas activer la résistance de terminaison 120Ω.
+**Switch 120Ω :**
+- `OFF` si la télécommande filaire est présente (branchement en parallèle)
+- `ON` si la télécommande est débranchée (RPi seul sur le bus — terminaison requise)
+
+> Le Waveshare (FT232RNL) gère le basculement DE/RE automatiquement.
+> Il **ne renvoie pas l'écho local** en émission : les trames envoyées par le RPi
+> n'apparaissent pas dans le flux de réception.
 
 ---
 
-## 2. Protocole RS485 — ce qu'on a appris
+## 2. Protocole RS485 — modèle complet
 
 ### Paramètres physiques
 
@@ -55,67 +58,271 @@ Switch 120Ω → OFF  (branchement en parallèle, pas en terminaison)
 | Taille de trame | **80 octets fixes** |
 | Cadence | ~1 trame/seconde par type |
 
-### Types de trames
+### Rôles des trames — modèle confirmé avril 2026
 
-| Header | Hex | Émetteur | Fréquence | Rôle |
-|--------|-----|----------|-----------|------|
-| `DD` | 0xDD | PAC → télécommande | ~1/s | Données capteurs temps réel |
-| `D2` | 0xD2 | Télécommande → PAC | ~1/s | Configuration / consignes |
-| `CC` | 0xCC | Télécommande → PAC | ~1/s | Configuration (contenu identique à D2) |
-| `CD` | 0xCD | Télécommande → PAC | Rare | Trame de commande (changement consigne) |
+> ⚠️ Contrairement à ce qu'on pourrait attendre, **c'est la PAC qui est maître du bus**.
+> Elle émet D2 en broadcast avec sa configuration courante.
+> La télécommande répond en miroir avec CC (keepalive) et envoie CD pour commander.
 
-**Marqueur de fin** : `byte[79]` = valeur du header pour D2/CC/CD. Pour DD, `byte[79]` est un compteur roulant.
+| Header | Hex  | Émetteur | Fréquence | Rôle |
+|--------|------|----------|-----------|------|
+| `DD`   | 0xDD | PAC      | ~1/s      | Statut live (températures, état compresseur) |
+| `D2`   | 0xD2 | **PAC**  | ~1/s      | Configuration courante broadcast (consigne, mode, power) |
+| `CC`   | 0xCC | Remote   | ~1/s      | Keepalive — miroir de D2, confirme réception |
+| `CD`   | 0xCD | Remote   | Sur commande | Commande : change consigne, power, mode |
 
-**Valeur "non disponible"** : `0x7F` (127) marque les octets sans donnée valide.
+### Checksum byte[79]
 
-### Décodage trame DD (statut temps réel)
+Toutes les trames D2, CC et CD ont un **checksum en byte[79]** :
 
-| Byte | Décodage | Exemple | Statut |
-|------|----------|---------|--------|
-| `[0]` | Header = 0xDD | `DD` | ✓ |
-| `[29]` | **Température eau** = valeur ÷ 10 (°C) | 114 → 11.4°C | ✓ avr 2026 |
-| `[20]` | **Température air extérieur** = valeur ÷ 2 (°C) | 26 → 13.0°C | ✓ avr 2026 |
-| `[22]` | Température secondaire (2ème capteur eau ?) = valeur ÷ 2 | 24 → 12.0°C | à confirmer |
-| `[3]` | Mode de fonctionnement (flags, à décoder) | | en cours |
-| `[79]` | Compteur roulant | | ✓ |
+```
+byte[79] = (sum(bytes[0..78]) + 0xAF) & 0xFF
+```
 
-### Décodage trame CD (commande)
+> Toute trame modifiée doit recalculer ce checksum. La PAC rejette silencieusement
+> les trames avec un checksum incorrect.
 
-| Byte | Décodage |
-|------|----------|
-| `[0]` | Header = 0xCD |
-| `[11]` | **Consigne température** (°C) |
-| `[79]` | 0xCD ou 0xCE |
+Pour DD, byte[79] est un compteur roulant (pas un checksum applicatif).
 
-### Stratégie de contrôle
+### Décodage trame DD (statut temps réel PAC → remote)
 
-1. Écouter le bus et mémoriser la dernière trame `CD` reçue (template)
-2. Pour changer la consigne : copier le template, modifier `byte[11]`, réinjecter sur le bus
-3. L'adaptateur Waveshare gère le basculement DE/RE automatiquement
+| Byte   | Décodage                                  | Exemple          | Statut       |
+|--------|-------------------------------------------|------------------|--------------|
+| `[0]`  | Header = 0xDD                             | —                | ✓            |
+| `[20]` | Température air extérieur = valeur ÷ 2 °C | 26 → 13.0°C      | ✓ avr 2026   |
+| `[29]` | Température eau piscine = valeur ÷ 10 °C  | 114 → 11.4°C     | ✓ avr 2026   |
+| `[3]`  | État compresseur (voir tableau ci-dessous)| 0xa1 → chauffe   | ✓ avr 2026   |
+| `[79]` | Compteur roulant                          | —                | ✓            |
+
+**Valeurs DD byte[3] :**
+
+| Valeur | Hex   | Signification       |
+|--------|-------|---------------------|
+| 161    | 0xa1  | Chauffe active      |
+| 33     | 0x21  | Marche / standby    |
+| 32     | 0x20  | Arrêt en cours      |
+| 0      | 0x00  | Éteint              |
+
+### Décodage trame D2 (configuration courante PAC → remote)
+
+La PAC émet D2 à ~1/s avec sa configuration interne. Quand le RPi modifie
+un paramètre (via CD), D2 se met à jour pour refléter le nouvel état.
+
+| Byte   | Décodage                                    |
+|--------|---------------------------------------------|
+| `[0]`  | Header = 0xD2                               |
+| `[1]`  | État + mode (voir tableau modes)             |
+| `[4]`  | Sous-mode (0x01 = normal, 0x02 = cooling)   |
+| `[11]` | Consigne température (°C)                   |
+| `[79]` | Checksum = (sum[0..78] + 0xAF) & 0xFF       |
+
+### Modes de chauffe — byte[1] + byte[4]
+
+| byte[1] | byte[4] | Mode              | bit 0 de byte[1] |
+|---------|---------|-------------------|-----------------|
+| 0x5B    | 0x01    | **inverter** (on) | 1 = allumé      |
+| 0x3B    | 0x01    | **fix** (on)      | 1 = allumé      |
+| 0x1B    | 0x01    | **sun** (on)      | 1 = allumé      |
+| 0x1B    | 0x02    | **cooling** (on)  | 1 = allumé      |
+| 0x5A    | 0x01    | inverter (off)    | 0 = éteint      |
+| 0x3A    | 0x01    | fix (off)         | 0 = éteint      |
+| …       | …       | …                 | …               |
+
+**Règle :** `byte[1] bit 0 = 1` → allumé, `bit 0 = 0` → éteint.
+Les bits 1-7 encodent le mode. Les modes diffèrent par pas de `0x20`.
+
+### Trame CC (keepalive remote → PAC)
+
+CC est le miroir exact de D2 : mêmes octets [1..78], seul le header change.
+
+```
+CC[0]  = 0xCC  (à la place de 0xD2)
+CC[79] = (sum(CC[0..78]) + 0xAF) & 0xFF
+```
+
+La PAC s'attend à recevoir CC après chaque D2 (environ 50–100 ms après).
+Sans CC régulier, la PAC peut considérer la télécommande absente.
+
+### Trame CD (commande remote → PAC)
+
+Pour modifier la configuration, le remote envoie CD avec les nouveaux paramètres.
+Le RPi répète CD sur **~8 cycles D2 consécutifs** pour garantir la réception.
+
+```
+CD[0]  = 0xCD
+CD[1]  = byte[1] avec le mode et le bit on/off voulus
+CD[4]  = byte[4] du mode voulu (0x01 ou 0x02)
+CD[11] = nouvelle consigne (°C)
+CD[79] = (sum(CD[0..78]) + 0xAF) & 0xFF
+```
+
+> La PAC met à jour son D2 broadcast dès qu'elle accepte un CD.
+> Surveiller D2 byte[1] et byte[11] pour confirmer la prise en compte.
 
 ---
 
-## 3. Architecture logicielle
+## 3. Méthodologie de reverse engineering
+
+Cette section documente **comment analyser les trames et tester des commandes**
+avec la télécommande filaire en place. C'est la méthode utilisée pour établir
+le protocole décrit ci-dessus.
+
+### Principe général
+
+Le bus RS485 est un média partagé : tout ce qui circule est visible par tous.
+En branchant le Waveshare en parallèle (switch 120Ω OFF), on observe passivement
+toutes les trames sans perturber le bus.
+
+La méthode est : **provoquer une action connue sur la télécommande** → **corréler
+avec les changements de bytes dans les trames capturées** → **en déduire l'encodage**.
+
+### Étape 1 — Capture passive
+
+Arrêter le service poolex (libère le port), puis lancer une capture en CSV :
+
+```bash
+sudo systemctl stop poolex
+
+nohup /opt/poolex-control/venv/bin/python3 -c "
+import sqlite3, time, sys
+sys.path.insert(0, '/opt/poolex-control')
+from poolex.capture import RS485Capture
+from poolex.decoder import Frame
+
+log = open('/tmp/capture.log', 'w')
+log.write('timestamp,header,b1,b4,b11,b79,raw\n')
+log.flush()
+
+def on_frame(f):
+    log.write(f'{time.time():.3f},{f.name},'
+              f'0x{f.raw[1]:02x},0x{f.raw[4]:02x},{f.raw[11]},'
+              f'0x{f.raw[79]:02x},{f.raw.hex()}\n')
+    log.flush()
+
+c = RS485Capture(port='/dev/ttyUSB0', on_frame=on_frame)
+c.start()
+time.sleep(300)   # 5 minutes
+c.stop()
+log.close()
+" > /tmp/capture.out 2>&1 &
+
+echo "Capture démarrée (PID $!)"
+```
+
+Redémarrer le service après :
+```bash
+sudo systemctl start poolex
+```
+
+### Étape 2 — Provoquer des actions et corréler
+
+Effectuer des actions sur la télécommande filaire (changer la consigne, le mode,
+allumer/éteindre) **une par une**, en notant l'heure approximative.
+
+Après chaque action, vérifier les trames CD capturées :
+
+```bash
+# Voir tous les CD distincts par b[1] et b[11]
+grep ',CD,' /tmp/capture.log | cut -d',' -f1,3,4,5 | sort -u
+
+# Voir les transitions de D2 (reflète l'état interne de la PAC)
+grep ',D2,' /tmp/capture.log | cut -d',' -f1,3,4,5 \
+  | awk -F',' '{ if ($2 != prev2 || $3 != prev3 || $4 != prev4)
+      { print; prev2=$2; prev3=$3; prev4=$4 } }'
+```
+
+### Étape 3 — Analyser les bytes variables
+
+Pour identifier quel byte change lors d'une action :
+
+```python
+# Comparer deux trames hexadécimales (ex: avant/après changement de mode)
+a = bytes.fromhex("d25b0001012d...")
+b = bytes.fromhex("d23b0001012d...")
+diffs = [(i, f'0x{a[i]:02x}→0x{b[i]:02x}') for i in range(80) if a[i] != b[i]]
+print(diffs)
+```
+
+Ou utiliser l'endpoint `/frames` pour récupérer les trames brutes :
+
+```bash
+# Comparer les 2 dernières trames D2
+curl "http://raspberrypi4:5000/frames?header=D2&limit=2"
+```
+
+### Étape 4 — Valider le checksum
+
+Vérifier que byte[79] correspond à la formule pour les trames CD capturées :
+
+```python
+raw = bytes.fromhex("cd5b0001...")
+expected = (sum(raw[:79]) + 0xAF) & 0xFF
+assert expected == raw[79], f"Checksum: attendu 0x{expected:02x}, reçu 0x{raw[79]:02x}"
+```
+
+### Étape 5 — Tester une commande en live
+
+Avec le service poolex actif (et la télécommande branchée ou non) :
+
+```bash
+# Changer la consigne
+curl -X POST http://raspberrypi4:5000/control/setpoint \
+     -H "Content-Type: application/json" -d '{"temperature": 25}'
+
+# Surveiller D2 pour confirmer que la PAC a accepté
+watch -n1 "curl -s http://raspberrypi4:5000/status | python3 -m json.tool"
+```
+
+La PAC confirme en mettant à jour D2 byte[11]. Un changement non pris en compte
+indique un checksum incorrect ou un timing de bus inadapté.
+
+### Règles importantes pour l'analyse
+
+| Règle | Explication |
+|-------|-------------|
+| Modifier **un seul paramètre à la fois** | Sinon impossible de corréler |
+| **Toujours noter l'heure** de chaque action | Les timestamps du log permettent de filtrer |
+| Surveiller **D2 en retour** après une commande | La PAC confirme en mettant à jour son D2 |
+| Le Waveshare **ne s'écho pas** en RX | Les trames envoyées par le RPi ne reviennent pas dans le log |
+| Le service poolex et une capture manuelle **ne peuvent pas coexister** sur le même port | Arrêter l'un avant de lancer l'autre |
+| byte[79] doit toujours être **recalculé** après modification | `(sum(bytes[0..78]) + 0xAF) & 0xFF` |
+
+### Cohabitation télécommande filaire + RPi
+
+La télécommande filaire et le RPi **peuvent coexister sur le bus** simultanément.
+Le RPi envoie CC (keepalive) et CD (commandes), la télécommande fait de même.
+Le RPi lit D2 de la PAC et met à jour son état interne — la télécommande reste
+utilisable pour observer l'effet des commandes RPi sur l'afficheur.
+
+Pour des captures propres (sans CC/CD parasites du RPi) :
+```bash
+sudo systemctl stop poolex
+# ... capture manuelle ...
+sudo systemctl start poolex
+```
+
+---
+
+## 4. Architecture logicielle
 
 ```
 poolex-control/
 ├── poolex/
-│   ├── decoder.py      # Décodage des trames (Frame, DDFrame, CDFrame, diff)
-│   ├── capture.py      # Lecture série en thread, retry automatique si port absent
-│   ├── storage.py      # Stockage SQLite (schéma BLOB, 1 ligne par trame)
-│   ├── controller.py   # Injection de trames CD modifiées
-│   ├── api.py          # API REST Flask
-│   ├── analyzer.py     # Analyseur CLI temps réel (diff coloré)
-│   └── test_protocol.py # Interface web de test guidé
+│   ├── decoder.py       # Décodage des trames (Frame, DDFrame, CDFrame, diff)
+│   ├── capture.py       # Lecture série en thread, retry si port absent
+│   ├── storage.py       # Stockage SQLite (schéma BLOB, 1 ligne par trame)
+│   ├── controller.py    # Protocole réactif : CC keepalive + CD commandes
+│   ├── api.py           # API REST Flask
+│   └── test_protocol.py # Blueprint de test guidé (legacy)
 ├── tests/
 │   ├── test_decoder.py
 │   └── test_controller.py
 ├── scripts/
-│   ├── install.sh      # Installation initiale sur le RPi
-│   └── poolex.service  # Unit systemd
+│   ├── install.sh       # Installation initiale sur le RPi
+│   └── poolex.service   # Unit systemd
 └── .github/workflows/
-    ├── ci.yml          # Lint + tests (GitHub cloud)
-    └── deploy.yml      # Déploiement automatique (self-hosted runner sur RPi)
+    ├── ci.yml           # Lint + tests (ubuntu-latest)
+    └── deploy.yml       # Déploiement automatique (self-hosted runner RPi)
 ```
 
 ### Flux de données
@@ -123,26 +330,47 @@ poolex-control/
 ```
 Bus RS485
    │
-   ▼
-/dev/ttyUSB0  (Waveshare FT232RNL)
+   ├─── PAC envoie DD (~1/s) ────────────────────►  capture.py
+   ├─── PAC envoie D2 (~1/s) ────────────────────►  capture.py
+   │                                                      │
+   │                                               storage.py → SQLite
+   │                                                      │
+   │                                               controller.py
+   │                                               ├─ lit D2 → met à jour état interne
+   │                                               ├─ envoie CC (~50ms après D2)
+   │                                               └─ envoie CD (sur commande API)
    │
-   ▼
-capture.py  ──► storage.py  ──► SQLite /var/lib/poolex/poolex.db
+   ◄─── RPi envoie CC ──────────────────────────── controller.py
+   ◄─── RPi envoie CD (commandes) ──────────────── controller.py
    │
-   ├──► controller.py  (mémorise les trames CD)
+api.py (Flask :5000)
+   ├── GET  /status          → état courant (températures, setpoint, power, mode)
+   ├── GET  /frames          → trames brutes récentes
+   ├── GET  /frames/stats    → comptage par type
+   ├── POST /control/setpoint → CD avec nouveau byte[11]
+   ├── POST /control/power    → CD avec byte[1] bit 0 modifié
+   └── POST /control/mode     → CD avec byte[1] + byte[4] du mode voulu
+```
+
+### Logique du contrôleur
+
+```
+Démarrage
    │
-   ▼
-api.py  (Flask :5000)
+   ├─ Charger template D2 depuis SQLite (dernier D2 connu)
+   │  → controller_ready = True immédiatement (pas besoin du bus au démarrage)
    │
-   ├── GET  /status
-   ├── GET  /frames
-   ├── GET  /frames/stats
-   └── POST /control/setpoint  ──► controller.py ──► Bus RS485
+   └─ Boucle : attendre D2 de la PAC
+         │
+         ├─ Mettre à jour template (setpoint, mode, power reflets de la PAC)
+         ├─ 50ms après → envoyer CC (miroir de D2, checksum recalculé)
+         └─ Si commande en attente → envoyer CD (8 cycles pour fiabilité)
+                                     → annuler après 8 cycles
 ```
 
 ---
 
-## 4. Installation sur le Raspberry Pi
+## 5. Installation sur le Raspberry Pi
 
 ### Prérequis
 
@@ -150,179 +378,103 @@ api.py  (Flask :5000)
 - Python ≥ 3.11
 - Accès SSH et `sudo`
 
-### Étape 1 — Mettre à jour le système
-
-```bash
-sudo apt update && sudo apt upgrade -y
-```
-
-### Étape 2 — Cloner le repo
+### Étape 1 — Cloner et installer
 
 ```bash
 git clone https://github.com/eldiablotin/poolex-control.git
 cd poolex-control
-```
-
-Si le repo est privé, configurer le PAT d'abord :
-
-```bash
-git config --global credential.helper store
-git remote set-url origin https://<USERNAME>:<PAT>@github.com/eldiablotin/poolex-control.git
-```
-
-### Étape 3 — Lancer le script d'installation
-
-```bash
 bash scripts/install.sh
 ```
 
-Ce script effectue automatiquement :
+Le script effectue automatiquement :
 
 | Étape | Action |
 |-------|--------|
 | 1 | Installation des paquets système (`python3-venv`, `git`) |
 | 2 | Ajout de l'utilisateur au groupe `dialout` (accès `/dev/ttyUSB0`) |
 | 3 | Création de `/opt/poolex-control/` et `/var/lib/poolex/` |
-| 4 | Création du virtualenv Python + installation des dépendances |
-| 5 | Installation et activation du service systemd `poolex` |
-| 6 | Configuration sudoers (restart service sans mot de passe) |
+| 4 | Virtualenv Python + installation des dépendances |
+| 5 | Service systemd `poolex` installé et activé |
+| 6 | Règle sudoers (restart sans mot de passe) |
 
-> ⚠️ **Se déconnecter et reconnecter en SSH** après l'installation pour que le groupe `dialout` prenne effet.
+> ⚠️ Se déconnecter et reconnecter en SSH après l'installation (groupe `dialout`).
 
-### Étape 4 — Brancher l'adaptateur USB-RS485
-
-Brancher l'adaptateur sur un port USB du RPi. Vérifier qu'il est reconnu :
+### Étape 2 — Vérifier
 
 ```bash
-ls /dev/ttyUSB*
-# doit afficher : /dev/ttyUSB0
+# Port USB-RS485
+ls /dev/ttyUSB*              # → /dev/ttyUSB0
 
-lsusb | grep -i ftdi
-# doit afficher : Future Technology Devices International
-```
-
-### Étape 5 — Démarrer le service
-
-```bash
-sudo systemctl start poolex
-journalctl -u poolex -f
-```
-
-Sortie attendue :
-```
-DB initialisée : /var/lib/poolex/poolex.db
-Thread de capture démarré (port cible : /dev/ttyUSB0)
-Port /dev/ttyUSB0 ouvert à 9600 baud
-API démarrée sur le port 5000
-```
-
-### Vérifier que tout fonctionne
-
-```bash
-# Statut du service
+# Service
 systemctl status poolex
-
-# Tester l'API
-curl http://raspberrypi4:5000/status
-curl http://raspberrypi4:5000/frames/stats
+curl http://localhost:5000/status
 ```
 
-### Accès réseau — hostname mDNS
-
-Le RPi est accessible via son nom d'hôte sur tout réseau local, **sans configuration IP** :
-
-```
-ssh pi@raspberrypi4     # SSH direct (mDNS géré par avahi-daemon)
-``` 
-
-> `avahi-daemon` est actif par défaut sur Debian. Le hostname `raspberrypi4` fonctionne
-> sur Windows 10/11, macOS et Linux sans configuration IP.
-> L'IP DHCP peut changer, le hostname reste stable.
-
-> ℹ️ L'API Flask écoute sur `0.0.0.0:5000` — accessible depuis le PC via `http://raspberrypi4:5000/status`.
-> La route `/` (racine) retourne la liste des endpoints disponibles.
-
-### Variables d'environnement (optionnel)
-
-Le service peut être configuré via des variables dans `/etc/systemd/system/poolex.service` :
+### Variables d'environnement
 
 | Variable | Défaut | Description |
 |----------|--------|-------------|
-| `POOLEX_SERIAL_PORT` | `/dev/ttyUSB0` | Port série de l'adaptateur |
-| `POOLEX_DB_PATH` | `/var/lib/poolex/poolex.db` | Chemin de la base de données |
-| `POOLEX_API_PORT` | `5000` | Port de l'API REST |
+| `POOLEX_SERIAL_PORT` | `/dev/ttyUSB0` | Port série |
+| `POOLEX_DB_PATH` | `/var/lib/poolex/poolex.db` | Base de données |
+| `POOLEX_API_PORT` | `5000` | Port de l'API |
 
 ---
 
-## 5. Mise en place GitHub Actions
+## 6. Mise en place GitHub Actions
 
-Le déploiement automatique utilise un **runner self-hosted** sur le RPi :
-à chaque push sur `main`, le code est déployé et le service redémarré.
+À chaque `git push` sur `main` : CI (lint + tests) puis déploiement automatique sur le RPi.
 
-### Étape 1 — Créer un Personal Access Token (PAT) GitHub
+### Runner self-hosted
 
-Sur GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens :
-- Repo : `poolex-control`
-- Permissions : `Contents: Read`, `Actions: Read and Write`
-
-### Étape 2 — Ajouter le PAT comme secret du repo
-
-Sur GitHub → repo `poolex-control` → Settings → Secrets and variables → Actions :
-- Nom : `GH_PAT`
-- Valeur : le PAT créé à l'étape précédente
-
-### Étape 3 — Installer le runner sur le RPi
-
-Sur GitHub → repo → Settings → Actions → Runners → **New self-hosted runner** :
-- Sélectionner : **Linux / ARM64**
-- Copier le token affiché (valable 1 heure)
+Sur GitHub → repo → Settings → Actions → Runners → **New self-hosted runner** (Linux / ARM64).
 
 Sur le RPi :
 
 ```bash
 mkdir -p ~/actions-runner && cd ~/actions-runner
-
-# Télécharger le runner (vérifier la dernière version sur la page GitHub)
 curl -o runner.tar.gz -L \
   https://github.com/actions/runner/releases/latest/download/actions-runner-linux-arm64.tar.gz
 tar xzf runner.tar.gz
-
-# Configurer avec le token obtenu sur GitHub
 ./config.sh --url https://github.com/eldiablotin/poolex-control --token <TOKEN>
-
-# Installer et démarrer comme service systemd
-sudo ./svc.sh install
-sudo ./svc.sh start
 ```
 
-Vérifier que le runner est actif :
+Créer le service systemd **en tant que `pi`** (le runner refuse de tourner en root) :
+
+```ini
+# /etc/systemd/system/runner-poolex.service
+[Unit]
+Description=GitHub Actions Runner - poolex-control
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/actions-runner
+ExecStart=/home/pi/actions-runner/run.sh
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+```
 
 ```bash
-systemctl status "actions.runner.*"
+sudo systemctl daemon-reload
+sudo systemctl enable --now runner-poolex
 ```
 
-### Résultat
-
-À chaque `git push` sur `main` depuis n'importe quelle machine :
-
-```
-Push → CI (lint + tests) → Deploy sur RPi → Restart service
-```
+> La directive `concurrency: cancel-in-progress: true` dans `deploy.yml` annule les
+> anciens jobs quand un nouveau push arrive — évite qu'un déploiement antérieur
+> écrase une version plus récente si le runner était offline.
 
 ---
 
-## 6. Utilisation de l'API
+## 7. Utilisation de l'API
 
-L'API écoute sur `0.0.0.0:5000` — accessible depuis tout le réseau local.
-
-```
-http://raspberrypi4:5000/       → liste des endpoints
-http://raspberrypi4:5000/status → état de la PAC
-```
+L'API écoute sur `0.0.0.0:5000`.
 
 ### GET /status
-
-Retourne le dernier état décodé de la PAC.
 
 ```bash
 curl http://raspberrypi4:5000/status
@@ -330,47 +482,27 @@ curl http://raspberrypi4:5000/status
 
 ```json
 {
-  "water_temp": 28.0,
-  "air_temp": 25,
-  "mode": 128,
-  "setpoint": 28,
+  "water_temp": 11.7,
+  "air_temp": 16.5,
+  "pac_mode": 161,
+  "setpoint": 26,
+  "power": true,
+  "mode": "inverter",
   "controller_ready": true
 }
 ```
 
 | Champ | Description |
 |-------|-------------|
-| `water_temp` | Température eau piscine (°C) |
-| `air_temp` | Température air extérieur (°C) |
-| `mode` | Byte de mode brut (décodage en cours) |
-| `setpoint` | Consigne température courante (°C) |
-| `controller_ready` | `true` si une trame CD a été reçue (prêt à envoyer des commandes) |
-
-### GET /frames
-
-```bash
-# 20 dernières trames de tous types
-curl http://raspberrypi4:5000/frames
-
-# Filtrer par type
-curl "http://raspberrypi4:5000/frames?header=DD&limit=5"
-```
-
-### GET /frames/stats
-
-```bash
-curl http://raspberrypi4:5000/frames/stats
-```
-
-```json
-{"CC": 1240, "CD": 12, "D2": 1356, "DD": 1298}
-```
+| `water_temp` | Température eau piscine (°C) — DD byte[29] ÷ 10 |
+| `air_temp` | Température air extérieur (°C) — DD byte[20] ÷ 2 |
+| `pac_mode` | État compresseur brut — DD byte[3] (161=chauffe, 33=marche, 0=éteint) |
+| `setpoint` | Consigne courante (°C) — reflète le D2 de la PAC |
+| `power` | État on/off — D2 byte[1] bit 0 |
+| `mode` | Mode de chauffe — inverter / fix / sun / cooling |
+| `controller_ready` | `true` si un template D2 est disponible |
 
 ### POST /control/setpoint
-
-Envoie une nouvelle consigne de température (10–40°C).
-
-> ⚠️ Nécessite que `controller_ready` soit `true` (une trame CD doit avoir été reçue).
 
 ```bash
 curl -X POST http://raspberrypi4:5000/control/setpoint \
@@ -378,269 +510,98 @@ curl -X POST http://raspberrypi4:5000/control/setpoint \
      -d '{"temperature": 28}'
 ```
 
-```json
-{"status": "ok", "temperature": 28}
+Plage : 8–40°C. La PAC confirme en mettant à jour D2 byte[11].
+
+### POST /control/power
+
+```bash
+curl -X POST http://raspberrypi4:5000/control/power \
+     -H "Content-Type: application/json" \
+     -d '{"state": "off"}'   # ou "on"
+```
+
+### POST /control/mode
+
+```bash
+curl -X POST http://raspberrypi4:5000/control/mode \
+     -H "Content-Type: application/json" \
+     -d '{"mode": "fix"}'    # inverter | fix | sun | cooling
+```
+
+### GET /frames
+
+```bash
+# 20 dernières trames
+curl http://raspberrypi4:5000/frames
+
+# Filtrer par type
+curl "http://raspberrypi4:5000/frames?header=DD&limit=10"
+```
+
+### GET /frames/stats
+
+```bash
+curl http://raspberrypi4:5000/frames/stats
+# {"CC": 2353, "CD": 235, "D2": 8668, "DD": 10475}
 ```
 
 ---
 
-## 7. Dépannage
+## 8. Dépannage
 
-### Diagnostic complet — port /dev/ttyUSB0
-
-Suivre les étapes dans l'ordre. S'arrêter dès qu'une étape révèle le problème.
-
-#### Étape 1 — L'adaptateur est-il vu par le système USB ?
+### Port /dev/ttyUSB0 absent ou instable
 
 ```bash
-lsusb | grep -i ftdi
-# Attendu : Bus 00X Device 00Y: ID 0403:6001 Future Technology Devices International, Ltd FT232 Serial (UART) IC
-```
+lsusb | grep -i ftdi            # vérifier détection USB
+dmesg | grep -E "ttyUSB|ftdi"   # voir les événements kernel
 
-Si rien n'apparaît : vérifier le câble USB, essayer un autre port USB du RPi.
-
-#### Étape 2 — Le kernel a-t-il créé le nœud série ?
-
-```bash
-ls /dev/ttyUSB* 2>/dev/null || echo "Aucun ttyUSB présent"
-dmesg | grep -E "ttyUSB|ftdi|FTDI|FT232" | tail -20
-```
-
-Sortie normale au branchement :
-```
-usb 1-1.2: new full-speed USB device number 3 using xhci_hcd
-usb 1-1.2: New USB device found, idVendor=0403, idProduct=6001
-ftdi_sio 1-1.2:1.0: FTDI USB Serial Device converter detected
-usb 1-1.2: FTDI USB Serial Device converter now attached to ttyUSB0
-```
-
-Si `attached to ttyUSB0` est suivi de `disconnected` : voir **Étape 3 (brltty)**.
-
-#### Étape 3 — brltty vole-t-il le port ? (cause #1 sur Debian)
-
-`brltty` (daemon braille) reconnaît les puces FTDI et les débranche immédiatement.
-
-```bash
-# Détecter la présence de brltty
-systemctl status brltty 2>/dev/null || echo "brltty absent"
-dmesg | grep -i brltty | tail -5
-```
-
-Si brltty est actif ou visible dans dmesg → le supprimer définitivement :
-
-```bash
-sudo systemctl stop brltty
-sudo systemctl disable brltty
+# Si ttyUSB0 apparaît puis disparaît immédiatement → brltty
 sudo apt remove --purge brltty -y
-
-# Débrancher puis rebrancher l'adaptateur USB
-ls /dev/ttyUSB*
-# Doit afficher : /dev/ttyUSB0
+# Débrancher / rebrancher l'adaptateur
 ```
 
-#### Étape 4 — Permissions du nœud
+### Pas de trames sur le bus
 
 ```bash
-ls -la /dev/ttyUSB0
-# Attendu : crw-rw---- 1 root dialout ... /dev/ttyUSB0
-
-groups pi
-# Doit contenir : dialout
-```
-
-Si `pi` n'est pas dans `dialout` :
-
-```bash
-sudo usermod -a -G dialout pi
-# Déconnecter / reconnecter la session SSH pour que le groupe prenne effet
-```
-
-#### Étape 5 — Le port est-il déjà utilisé par un autre process ?
-
-```bash
-lsof /dev/ttyUSB0 2>/dev/null
-# Si une ligne apparaît : un autre process tient le port
-```
-
-Cas courant : le service `poolex` est déjà en cours et bloque le port pour un test manuel.
-
-```bash
-sudo systemctl stop poolex
-# Puis relancer le test manuel
-```
-
-#### Étape 6 — Test de lecture brute (validation end-to-end)
-
-Vérifie que des octets arrivent réellement depuis le bus RS485 :
-
-```bash
-# Lecture brute pendant 5 secondes (9600 baud 8N1)
+# Test de lecture brute
 timeout 5 cat /dev/ttyUSB0 | xxd | head -20
 ```
 
-Si des octets apparaissent : la capture fonctionne, le problème est logiciel.
-Si rien n'apparaît mais que le port existe : vérifier le branchement A+/B- et le switch 120Ω (doit être OFF).
+- Aucun octet → vérifier câblage A+/B-, switch 120Ω adapté (ON si remote débranchée)
+- Octets présents mais trames invalides → vérifier 9600 baud, longueur de câble
 
-#### Étape 7 — Test avec pyserial en direct
+### Service ne démarre pas
 
 ```bash
-/opt/poolex-control/venv/bin/python3 - <<'EOF'
-import serial, time
-s = serial.Serial('/dev/ttyUSB0', 9600, timeout=2)
-print("Port ouvert :", s.name)
-data = s.read(80)
-print(f"Octets reçus : {len(data)}")
-if data:
-    print("Premier octet (header) :", hex(data[0]))
-s.close()
-EOF
+journalctl -u poolex -n 30 --no-pager
 ```
 
-#### Récapitulatif des causes fréquentes
+| Erreur | Solution |
+|--------|----------|
+| `No such file: /dev/ttyUSB0` | Normal, retry automatique toutes les 10s |
+| `Permission denied: /dev/ttyUSB0` | `sudo usermod -a -G dialout pi` + reconnexion |
+| `ModuleNotFoundError` | `pip install -r /opt/poolex-control/requirements.txt` dans le venv |
 
-| Symptôme | Cause probable | Solution |
-|----------|---------------|----------|
-| `lsusb` vide | Câble ou port USB défaillant | Changer câble / port |
-| `ttyUSB0` crée puis disparaît | `brltty` vole l'adaptateur | `apt remove brltty` |
-| `Permission denied` | `pi` hors groupe `dialout` | `usermod -a -G dialout pi` |
-| `lsof` montre un process | Port déjà ouvert | Arrêter le service `poolex` |
-| Port OK, 0 octets reçus | Branchement A+/B- inversé ou switch 120Ω ON | Vérifier câblage |
-| Octets reçus, trames invalides | Baud rate ou câblage bruit | Vérifier 9600 baud, longueur câble |
-
-### Le service ne démarre pas
+### Runner GitHub Actions ne démarre pas
 
 ```bash
-journalctl -u poolex -n 50 --no-pager
+systemctl status runner-poolex
+journalctl -u runner-poolex -n 20
 ```
 
-| Erreur | Cause | Solution |
-|--------|-------|----------|
-| `No such file or directory: '/dev/ttyUSB0'` | Adaptateur non branché | Normal, le service réessaie toutes les 10s |
-| `Permission denied: '/dev/ttyUSB0'` | Utilisateur hors du groupe dialout | `sudo usermod -a -G dialout $USER` puis reconnexion SSH |
-| `ModuleNotFoundError` | Venv absent ou incomplet | `python3 -m venv /opt/poolex-control/venv && /opt/poolex-control/venv/bin/pip install -r /opt/poolex-control/requirements.txt` |
+Cause fréquente : service configuré `Type=oneshot` ou `User=root`.
+Le runner refuse de tourner en root — voir [section 6](#6-mise-en-place-github-actions).
 
-### Le deploy GitHub Actions échoue
+### sudo cassé (erreur syntaxe sudoers)
 
 ```bash
-# Vérifier le runner
-systemctl status "actions.runner.*"
-
-# Vérifier les permissions du répertoire de déploiement
-ls -la /opt/ | grep poolex
-# doit afficher : drwxr-xr-x ... pi pi ... poolex-control
-
-# Corriger si nécessaire
-sudo chown -R pi:pi /opt/poolex-control
-```
-
-### sudo est cassé (erreur syntax dans sudoers)
-
-```bash
-# Utiliser su pour passer root
-su -
-
-# Supprimer le fichier cassé
+su -                             # passer root sans sudo
 rm /etc/sudoers.d/poolex
-
-# Recréer correctement (remplacer 'pi' par ton utilisateur)
-printf 'pi ALL=(ALL) NOPASSWD: /usr/bin/systemctl daemon-reload\n' > /etc/sudoers.d/poolex
-printf 'pi ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart poolex\n' >> /etc/sudoers.d/poolex
+printf 'pi ALL=(ALL) NOPASSWD: /usr/bin/systemctl daemon-reload\n' \
+       > /etc/sudoers.d/poolex
+printf 'pi ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart poolex\n' \
+       >> /etc/sudoers.d/poolex
 chmod 440 /etc/sudoers.d/poolex
-exit
 ```
 
-> ⚠️ Ne jamais mettre `user:group` dans sudoers — le caractère `:` est réservé et provoque une erreur de syntaxe.
-
----
-
-## 8. Protocole de test guidé
-
-Interface web permettant de conduire des tests provoqués pour valider le décodage
-des trames RS485 par corrélation action physique → changement de bytes.
-
-### Architecture de la session
-
-```
-Claude (SSH)          Opérateur (téléphone/PC près de la PAC)
-─────────────         ──────────────────────────────────────
-POST /test/api/start  →  Interface affiche l'étape 0 (relevé initial)
-                         Opérateur saisit les valeurs et confirme
-POST /test/api/next_step → Interface affiche : "Appuyez 1x sur ▲"
-                           Opérateur appuie sur la télécommande PAC
-                           Opérateur appuie sur FAIT
-                           → Timestamp précis enregistré
-                           → Capture RS485 pendant 2 min
-                           → Analyse des bytes changés
-POST /test/api/next_step → Étape suivante...
-GET  /test/api/report    → Rapport JSON complet
-```
-
-### Modèle de timing
-
-| Événement | Timestamp enregistré |
-|-----------|----------------------|
-| Étape présentée à l'opérateur | `step_presented_at` |
-| Opérateur appuie sur FAIT | `operator_confirmed_at` |
-| Début de capture des trames post-action | `capture_start_at` |
-| Fin de capture (fenêtre 2 min) | `capture_end_at` |
-
-> L'opérateur confirme **après avoir terminé** les pressions de boutons.
-> La fenêtre de capture de 2 minutes démarre à ce moment pour laisser le temps
-> à la PAC de propager le changement sur le bus RS485.
-
-### Protocole de test initial (consigne de chauffe)
-
-| Étape | Action demandée | Appuis bouton |
-|-------|----------------|---------------|
-| 0 | Relevé baseline (temp ext, eau, consigne affichés) | — |
-| 1 | Consigne +1°C | 1× bouton ▲ |
-| 2 | Consigne +2°C supplémentaires | 2× bouton ▲ |
-| 3 | Consigne −2°C | 2× bouton ▼ |
-| 4 | Consigne −1°C (retour initial) | 1× bouton ▼ |
-
-### Lancer une session
-
-**Opérateur** : ouvrir `http://raspberrypi4:5000/test` sur téléphone ou PC.
-
-**Claude (via SSH)** :
-
-```bash
-# 1. Démarrer la session
-ssh poolex-rpi "curl -s -X POST http://localhost:5000/test/api/start | python3 -m json.tool"
-
-# 2. Avancer après confirmation de l'opérateur (répéter pour chaque étape)
-ssh poolex-rpi "curl -s -X POST http://localhost:5000/test/api/next_step | python3 -m json.tool"
-
-# 3. Lire le rapport final (corrélations action → bytes RS485)
-ssh poolex-rpi "curl -s http://localhost:5000/test/api/report | python3 -m json.tool"
-```
-
-### Format du rapport
-
-```json
-{
-  "started_at": "2025-08-17T17:43:00Z",
-  "baseline": {
-    "temp_ext_display": 25,
-    "temp_eau_display": 28,
-    "consigne_display": 27
-  },
-  "events": [
-    {
-      "step_id": 1,
-      "label": "Consigne +1°C",
-      "delta": 1,
-      "step_presented_at": "2025-08-17T17:43:15Z",
-      "operator_confirmed_at": "2025-08-17T17:43:28Z",
-      "operator_delay_s": 13.2,
-      "capture_window_s": 120,
-      "frames_collected": {"DD": 20, "CD": 3, "D2": 20},
-      "analysis": {
-        "CD": {
-          "11": {"before": 27, "after": 28, "hex_before": "0x1B", "hex_after": "0x1C"}
-        }
-      }
-    }
-  ]
-}
-```
+> ⚠️ Ne jamais mettre `user:group` dans sudoers — le `:` est réservé.
