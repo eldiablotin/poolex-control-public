@@ -98,6 +98,8 @@ printf '%s ALL=(ALL) NOPASSWD: /usr/bin/systemctl daemon-reload\n' "$SERVICE_USE
     | sudo tee    /etc/sudoers.d/poolex > /dev/null
 printf '%s ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart poolex\n' "$SERVICE_USER" \
     | sudo tee -a /etc/sudoers.d/poolex > /dev/null
+printf '%s ALL=(ALL) NOPASSWD: /usr/bin/cp /opt/poolex-control/scripts/poolex.service /etc/systemd/system/poolex.service\n' "$SERVICE_USER" \
+    | sudo tee -a /etc/sudoers.d/poolex > /dev/null
 sudo chmod 440 /etc/sudoers.d/poolex
 
 # =============================================================================
