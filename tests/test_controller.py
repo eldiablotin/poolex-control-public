@@ -2,7 +2,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from poolex.controller import MODES, SETPOINT_MAX, SETPOINT_MIN, Controller
+from poolex.controller import SETPOINT_MAX, SETPOINT_MIN, Controller
 from poolex.decoder import FRAME_SIZE
 
 

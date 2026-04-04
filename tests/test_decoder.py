@@ -21,21 +21,24 @@ def make_raw(header: int, overrides: dict[int, int] | None = None) -> bytes:
 
 class TestDecode:
     def test_dd_water_temp(self):
-        # byte[22] = 56 → 28.0°C
-        frame = decode(make_raw(0xDD, {22: 56, 29: 25, 3: 128}))
+        # byte[29] / 10 → température eau  (confirmé avr 2026)
+        # ex: 114 → 11.4°C, 250 → 25.0°C
+        frame = decode(make_raw(0xDD, {29: 250, 3: 128}))
         assert isinstance(frame, DDFrame)
-        assert frame.water_temp == 28.0
+        assert frame.water_temp == 25.0
 
     def test_dd_air_temp(self):
-        frame = decode(make_raw(0xDD, {29: 22}))
+        # byte[20] / 2 → température air  (confirmé avr 2026)
+        # ex: 26 → 13.0°C, 44 → 22.0°C
+        frame = decode(make_raw(0xDD, {20: 44}))
         assert isinstance(frame, DDFrame)
-        assert frame.air_temp == 22
+        assert frame.air_temp == 22.0
 
     def test_dd_water_temp_half_degree(self):
-        # byte[22] = 57 → 28.5°C
-        frame = decode(make_raw(0xDD, {22: 57}))
+        # byte[29] = 115 → 11.5°C
+        frame = decode(make_raw(0xDD, {29: 115}))
         assert isinstance(frame, DDFrame)
-        assert frame.water_temp == 28.5
+        assert frame.water_temp == 11.5
 
     def test_cd_setpoint(self):
         frame = decode(make_raw(0xCD, {11: 28}))
@@ -60,15 +63,20 @@ class TestDecode:
         raw[0] = 0xAB
         assert decode(bytes(raw)) is None
 
-    def test_d2_bad_end_byte(self):
+    def test_d2_any_end_byte_accepted(self):
+        # byte[79] varie pour D2/CC (compteur/checksum variable) — pas de rejet
         raw = bytearray(make_raw(0xD2))
         raw[79] = 0xFF
-        assert decode(bytes(raw)) is None
+        frame = decode(bytes(raw))
+        assert isinstance(frame, Frame)
+        assert frame.name == "D2"
 
-    def test_cc_bad_end_byte(self):
+    def test_cc_any_end_byte_accepted(self):
         raw = bytearray(make_raw(0xCC))
         raw[79] = 0x00
-        assert decode(bytes(raw)) is None
+        frame = decode(bytes(raw))
+        assert isinstance(frame, Frame)
+        assert frame.name == "CC"
 
     def test_cd_end_byte_ce(self):
         # byte[79] = 0xCE est aussi valide pour CD (observé dans les captures)

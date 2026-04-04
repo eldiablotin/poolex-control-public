@@ -242,7 +242,7 @@ class Controller:
     def _control_loop(self) -> None:
         while self._running:
             # Attendre un D2 de la PAC (timeout 2s)
-            triggered = self._d2_event.wait(timeout=2.0)
+            self._d2_event.wait(timeout=2.0)
             self._d2_event.clear()
 
             if not self._running:
