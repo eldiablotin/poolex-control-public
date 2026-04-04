@@ -70,13 +70,14 @@ Switch 120Ω → OFF  (branchement en parallèle, pas en terminaison)
 
 ### Décodage trame DD (statut temps réel)
 
-| Byte | Décodage | Exemple |
-|------|----------|---------|
-| `[0]` | Header = 0xDD | `DD` |
-| `[22]` | **Température eau** = valeur ÷ 2 (°C) | 56 → 28.0°C |
-| `[29]` | **Température air extérieur** (°C) | 25 → 25°C |
-| `[3]` | Mode de fonctionnement (flags, à décoder) | |
-| `[79]` | Compteur roulant | |
+| Byte | Décodage | Exemple | Statut |
+|------|----------|---------|--------|
+| `[0]` | Header = 0xDD | `DD` | ✓ |
+| `[29]` | **Température eau** = valeur ÷ 10 (°C) | 114 → 11.4°C | ✓ avr 2026 |
+| `[20]` | **Température air extérieur** = valeur ÷ 2 (°C) | 26 → 13.0°C | ✓ avr 2026 |
+| `[22]` | Température secondaire (2ème capteur eau ?) = valeur ÷ 2 | 24 → 12.0°C | à confirmer |
+| `[3]` | Mode de fonctionnement (flags, à décoder) | | en cours |
+| `[79]` | Compteur roulant | | ✓ |
 
 ### Décodage trame CD (commande)
 
@@ -232,7 +233,7 @@ Le RPi est accessible via son nom d'hôte sur tout réseau local, **sans configu
 
 ```
 ssh pi@raspberrypi4     # SSH direct (mDNS géré par avahi-daemon)
-```
+``` 
 
 > `avahi-daemon` est actif par défaut sur Debian. Le hostname `raspberrypi4` fonctionne
 > sur Windows 10/11, macOS et Linux sans configuration IP.

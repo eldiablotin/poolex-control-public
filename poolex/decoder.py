@@ -11,10 +11,17 @@ Trames identifiées :
   0xCC  télécommande → PAC  : configuration / consignes (appareil B, contenu identique à D2)
   0xCD  télécommande → PAC  : trame de commande (rare, modification consigne)
 
-Décodages confirmés par analyse de 23 452 trames (29 juil – 18 août 2025) :
-  DD byte[22] / 2  → température eau piscine (°C)
-  DD byte[29]      → température air extérieur (°C)
-  CD byte[11]      → consigne température (°C)
+Décodages confirmés :
+  DD byte[29] / 10 → température eau piscine (°C)   ex: 114 → 11.4°C  ✓ avr 2026
+  DD byte[20] / 2  → température air extérieur (°C) ex:  26 → 13.0°C  ✓ avr 2026
+  CD byte[11]      → consigne température (°C)                         ✓ été 2025
+
+Bytes à préciser :
+  DD byte[22] / 2  → valeur proche temp eau (2ème capteur ? eau de sortie ?)
+  DD byte[3]       → mode de fonctionnement (flags, décodage en cours)
+
+Note : l'analyse été 2025 (23 452 trames) avait identifié byte[22]/2 → eau et byte[29] → air,
+mais les validations terrain avr 2026 montrent byte[29]/10 → eau et byte[20]/2 → air.
 """
 from __future__ import annotations
 
@@ -53,17 +60,17 @@ class Frame:
 @dataclass
 class DDFrame(Frame):
     """Trame statut PAC → télécommande (données capteurs temps réel)."""
-    water_temp: float   # byte[22] / 2  (ex: 56 → 28.0°C)
-    air_temp: int       # byte[29]      température extérieure °C
-    mode_byte: int      # byte[3]       mode de fonctionnement (à décoder)
+    water_temp: float   # byte[29] / 10  (ex: 114 → 11.4°C) ✓ avr 2026
+    air_temp: float     # byte[20] / 2   (ex:  26 → 13.0°C) ✓ avr 2026
+    mode_byte: int      # byte[3]        mode de fonctionnement (à décoder)
 
     @classmethod
     def from_raw(cls, raw: bytes) -> DDFrame:
         return cls(
             header=0xDD,
             raw=raw,
-            water_temp=raw[22] / 2.0,
-            air_temp=raw[29],
+            water_temp=raw[29] / 10.0,
+            air_temp=raw[20] / 2.0,
             mode_byte=raw[3],
         )
 
