@@ -31,6 +31,11 @@ echo "[2/7] Configuration mosquitto + utilisateur MQTT 'poolex'..."
 MQTT_PASS="$(openssl rand -hex 20)"
 sudo mosquitto_passwd -c -b /etc/mosquitto/passwd poolex "${MQTT_PASS}"
 
+# Nettoyer les anciens fichiers de conf qui pourraient créer des doublons
+sudo rm -f /etc/mosquitto/conf.d/auth.conf
+# Supprimer password_file du mosquitto.conf principal s'il y en a un
+sudo sed -i '/^password_file/d' /etc/mosquitto/mosquitto.conf
+
 # mosquitto 2.x exige un listener explicite quand allow_anonymous=false
 cat <<'MCONF' | sudo tee /etc/mosquitto/conf.d/poolex.conf > /dev/null
 listener 1883
