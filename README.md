@@ -12,9 +12,10 @@ en utilisant un Raspberry Pi 4 et un adaptateur USB-RS485.
 3. [Méthodologie de reverse engineering](#3-méthodologie-de-reverse-engineering)
 4. [Architecture logicielle](#4-architecture-logicielle)
 5. [Installation sur le Raspberry Pi](#5-installation-sur-le-raspberry-pi)
-6. [Mise en place GitHub Actions](#6-mise-en-place-github-actions)
-7. [Utilisation de l'API](#7-utilisation-de-lapi)
-8. [Dépannage](#8-dépannage)
+6. [Intégration MQTT et Home Assistant](#6-intégration-mqtt-et-home-assistant)
+7. [Mise en place GitHub Actions](#7-mise-en-place-github-actions)
+8. [Utilisation de l'API](#8-utilisation-de-lapi)
+9. [Dépannage](#9-dépannage)
 
 ---
 
@@ -312,8 +313,10 @@ poolex-control/
 │   ├── capture.py       # Lecture série en thread, retry si port absent
 │   ├── storage.py       # Stockage SQLite (schéma BLOB, 1 ligne par trame)
 │   ├── controller.py    # Protocole réactif : CC keepalive + CD commandes
+│   ├── mqtt.py          # Client MQTT + autodiscovery Home Assistant
 │   ├── api.py           # API REST Flask
-│   └── test_protocol.py # Blueprint de test guidé (legacy)
+│   ├── analyzer.py      # Outil CLI interactif pour reverse engineering
+│   └── test_protocol.py # Blueprint Flask de test guidé pour reverse engineering
 ├── tests/
 │   ├── test_decoder.py
 │   └── test_controller.py
@@ -390,12 +393,15 @@ Le script effectue automatiquement :
 
 | Étape | Action |
 |-------|--------|
-| 1 | Installation des paquets système (`python3-venv`, `git`) |
-| 2 | Ajout de l'utilisateur au groupe `dialout` (accès `/dev/ttyUSB0`) |
-| 3 | Création de `/opt/poolex-control/` et `/var/lib/poolex/` |
-| 4 | Virtualenv Python + installation des dépendances |
-| 5 | Service systemd `poolex` installé et activé |
-| 6 | Règle sudoers (restart sans mot de passe) |
+| 1 | Installation des paquets système (`python3-venv`, `git`, `mosquitto`) |
+| 2 | Création du broker Mosquitto avec un user `poolex` dédié + génération du mot de passe |
+| 3 | Ajout de l'utilisateur au groupe `dialout` (accès `/dev/ttyUSB0`) |
+| 4 | Création de `/opt/poolex-control/` et `/var/lib/poolex/` |
+| 5 | Virtualenv Python + installation des dépendances |
+| 6 | Service systemd `poolex` installé et activé |
+| 7 | Règle sudoers (restart sans mot de passe pour le runner CI) |
+
+À la fin du script, **le mot de passe MQTT généré est affiché**. Il doit être ajouté comme secret GitHub (`POOLEX_MQTT_PASSWORD`) pour que le deploy l'injecte automatiquement.
 
 > ⚠️ Se déconnecter et reconnecter en SSH après l'installation (groupe `dialout`).
 
@@ -417,10 +423,65 @@ curl http://localhost:5000/status
 | `POOLEX_SERIAL_PORT` | `/dev/ttyUSB0` | Port série |
 | `POOLEX_DB_PATH` | `/var/lib/poolex/poolex.db` | Base de données |
 | `POOLEX_API_PORT` | `5000` | Port de l'API |
+| `POOLEX_MQTT_HOST` | `localhost` | Broker MQTT |
+| `POOLEX_MQTT_PORT` | `1883` | Port MQTT |
+| `POOLEX_MQTT_USER` | `poolex` | Utilisateur MQTT |
+| `POOLEX_MQTT_PASSWORD` | *(secret)* | Mot de passe MQTT — via `poolex.env` |
+| `POOLEX_MQTT_PREFIX` | `poolex` | Préfixe des topics |
 
 ---
 
-## 6. Mise en place GitHub Actions
+## 6. Intégration MQTT et Home Assistant
+
+### Broker MQTT
+
+Le script `install.sh` installe **Mosquitto** sur le RPi et crée un utilisateur `poolex` dédié.
+Si vous utilisez un broker existant (ex: le Mosquitto add-on Home Assistant), configurez les variables d'environnement en conséquence.
+
+### Topics publiés (~toutes les 15s et après chaque commande)
+
+| Topic | Contenu |
+|-------|---------|
+| `poolex/status` | JSON complet (water_temp, air_temp, setpoint, power, mode, controller_ready) |
+| `poolex/water_temp` | Température eau piscine (°C) |
+| `poolex/air_temp` | Température air extérieur (°C) |
+| `poolex/setpoint` | Consigne courante (°C) |
+| `poolex/power` | `on` ou `off` |
+| `poolex/mode` | `inverter`, `fix`, `sun` ou `cooling` |
+
+### Topics de commande (subscribe)
+
+| Topic | Valeur attendue |
+|-------|----------------|
+| `poolex/control/setpoint` | Entier entre 8 et 40 |
+| `poolex/control/power` | `on` ou `off` |
+| `poolex/control/mode` | `inverter`, `fix`, `sun` ou `cooling` |
+
+### Home Assistant — autodiscovery
+
+Au démarrage, le service publie automatiquement les payloads de découverte MQTT.
+Home Assistant crée les entités suivantes sans configuration manuelle :
+
+| Entité | Type HA | Fonctionnalité |
+|--------|---------|---------------|
+| Poolex PAC | `climate` | On/off + consigne (8–40°C) + température courante |
+| Poolex PAC Mode | `select` | Sélection mode : inverter / fix / sun / cooling |
+| Poolex PAC Température eau | `sensor` | Température eau piscine (°C) |
+| Poolex PAC Température air | `sensor` | Température air extérieur (°C) |
+
+### Configuration avec le Mosquitto add-on HA
+
+Si Home Assistant utilise son propre broker Mosquitto (add-on), configurez poolex-control
+pour s'y connecter plutôt qu'au broker local :
+
+1. Dans HA → Settings → People → créer un utilisateur `poolex` avec un mot de passe
+2. Dans `scripts/poolex.service`, mettre `POOLEX_MQTT_HOST=<IP de HA>`
+3. Mettre à jour le secret GitHub `POOLEX_MQTT_PASSWORD` avec ce mot de passe
+4. L'intégration MQTT HA existante découvrira automatiquement les entités
+
+---
+
+## 7. Mise en place GitHub Actions
 
 À chaque `git push` sur `main` : CI (lint + tests) puis déploiement automatique sur le RPi.
 
@@ -470,7 +531,7 @@ sudo systemctl enable --now runner-poolex
 
 ---
 
-## 7. Utilisation de l'API
+## 8. Utilisation de l'API
 
 L'API écoute sur `0.0.0.0:5000`.
 
@@ -547,7 +608,7 @@ curl http://raspberrypi4:5000/frames/stats
 
 ---
 
-## 8. Dépannage
+## 9. Dépannage
 
 ### Port /dev/ttyUSB0 absent ou instable
 
