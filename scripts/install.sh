@@ -69,8 +69,8 @@ sudo chown "$SERVICE_USER:$SERVICE_USER" "$DEPLOY_DIR" "$DATA_DIR"
 
 # Env file pour le secret MQTT (ne sera écrasé que par le deploy CI)
 printf 'POOLEX_MQTT_PASSWORD=%s\n' "${MQTT_PASS}" | sudo tee "$DEPLOY_DIR/poolex.env" > /dev/null
+sudo chown "$SERVICE_USER:$SERVICE_USER" "$DEPLOY_DIR/poolex.env"
 sudo chmod 600 "$DEPLOY_DIR/poolex.env"
-sudo chown root:"$SERVICE_USER" "$DEPLOY_DIR/poolex.env"
 
 # 5. Environnement virtuel Python
 echo ""

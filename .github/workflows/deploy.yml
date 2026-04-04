@@ -30,7 +30,7 @@ jobs:
       - name: Write secrets env file
         run: |
           printf 'POOLEX_MQTT_PASSWORD=%s\n' '${{ secrets.POOLEX_MQTT_PASSWORD }}' \
-            > /opt/poolex-control/poolex.env
+            | tee /opt/poolex-control/poolex.env > /dev/null
           chmod 600 /opt/poolex-control/poolex.env
 
       - name: Setup venv and install dependencies
