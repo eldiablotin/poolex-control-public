@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # =============================================================================
 # install.sh — Installation initiale de poolex-control sur le Raspberry Pi
-# À exécuter UNE SEULE FOIS depuis le répertoire du repo cloné.
+# Idempotent : peut être relancé sans risque.
 # =============================================================================
 set -euo pipefail
 
-# Répertoire racine du repo, indépendamment d'où le script est lancé
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 REPO_URL="https://github.com/eldiablotin/poolex-control"
@@ -23,29 +22,31 @@ echo "======================================================"
 echo ""
 echo "[1/7] Mise à jour et installation des paquets système..."
 sudo apt-get update -q
-sudo apt-get install -y python3 python3-venv git mosquitto mosquitto-clients
+sudo apt-get install -y python3 python3-venv git openssl mosquitto mosquitto-clients
 
-# 2. Utilisateur MQTT mosquitto
+# 2. Utilisateur MQTT mosquitto (mosquitto 2.x : listener obligatoire)
 echo ""
-echo "[2/7] Création de l'utilisateur MQTT 'poolex'..."
+echo "[2/7] Configuration mosquitto + utilisateur MQTT 'poolex'..."
+
 MQTT_PASS="$(openssl rand -hex 20)"
 sudo mosquitto_passwd -c -b /etc/mosquitto/passwd poolex "${MQTT_PASS}"
-# Activer l'authentification dans mosquitto
-cat <<MCONF | sudo tee /etc/mosquitto/conf.d/auth.conf > /dev/null
+
+# mosquitto 2.x exige un listener explicite quand allow_anonymous=false
+cat <<'MCONF' | sudo tee /etc/mosquitto/conf.d/poolex.conf > /dev/null
+listener 1883
 allow_anonymous false
 password_file /etc/mosquitto/passwd
 MCONF
+
 sudo systemctl restart mosquitto
+sudo systemctl is-active mosquitto || { journalctl -u mosquitto -n 20 --no-pager; exit 1; }
+
 echo ""
-echo "  *** MOT DE PASSE MQTT GÉNÉRÉ (À COPIER DANS GITHUB SECRETS) ***"
+echo "  *** MOT DE PASSE MQTT GÉNÉRÉ — À COPIER DANS GITHUB SECRETS ***"
 echo "      Nom du secret : POOLEX_MQTT_PASSWORD"
 echo "      Valeur        : ${MQTT_PASS}"
 echo "  → https://github.com/eldiablotin/poolex-control/settings/secrets/actions"
 echo ""
-# Créer l'env file local immédiatement pour le premier démarrage
-sudo mkdir -p "$DEPLOY_DIR"
-printf 'POOLEX_MQTT_PASSWORD=%s\n' "${MQTT_PASS}" | sudo tee /opt/poolex-control/poolex.env > /dev/null
-sudo chmod 600 /opt/poolex-control/poolex.env
 
 # 3. Groupe dialout (accès /dev/ttyUSB0 sans sudo)
 echo ""
@@ -58,8 +59,11 @@ echo ""
 echo "[4/7] Création des répertoires..."
 sudo mkdir -p "$DEPLOY_DIR" "$DATA_DIR"
 sudo chown "$SERVICE_USER:$SERVICE_USER" "$DEPLOY_DIR" "$DATA_DIR"
-# poolex.env déjà créé à l'étape 2, ajuster l'ownership
-sudo chown root:"$SERVICE_USER" /opt/poolex-control/poolex.env
+
+# Env file pour le secret MQTT (ne sera écrasé que par le deploy CI)
+printf 'POOLEX_MQTT_PASSWORD=%s\n' "${MQTT_PASS}" | sudo tee "$DEPLOY_DIR/poolex.env" > /dev/null
+sudo chmod 600 "$DEPLOY_DIR/poolex.env"
+sudo chown root:"$SERVICE_USER" "$DEPLOY_DIR/poolex.env"
 
 # 5. Environnement virtuel Python
 echo ""
@@ -68,8 +72,9 @@ python3 -m venv "$DEPLOY_DIR/venv"
 "$DEPLOY_DIR/venv/bin/pip" install --upgrade pip -q
 "$DEPLOY_DIR/venv/bin/pip" install -r "$REPO_DIR/requirements.txt" -q
 
-# Déploiement initial des fichiers
-cp -r "$REPO_DIR/." "$DEPLOY_DIR/"
+# Déploiement initial des fichiers (le CI prendra le relais ensuite)
+find "$REPO_DIR" -maxdepth 1 -mindepth 1 ! -name '.git' \
+    -exec cp -r {} "$DEPLOY_DIR/" \;
 
 # 6. Service systemd
 echo ""
@@ -79,9 +84,9 @@ sed "s/__SERVICE_USER__/$SERVICE_USER/" "$REPO_DIR/scripts/poolex.service" \
 sudo systemctl daemon-reload
 sudo systemctl enable poolex
 
-# 7. Sudoers : uniquement le restart du service (sans mot de passe pour le runner)
+# 7. Sudoers pour le runner CI (systemctl sans mot de passe)
 echo ""
-echo "[7/7] Configuration sudoers (systemctl restart poolex)..."
+echo "[7/7] Configuration sudoers..."
 printf '%s ALL=(ALL) NOPASSWD: /usr/bin/systemctl daemon-reload\n' "$SERVICE_USER" \
     | sudo tee    /etc/sudoers.d/poolex > /dev/null
 printf '%s ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart poolex\n' "$SERVICE_USER" \
@@ -94,23 +99,22 @@ echo "======================================================"
 echo " Installation terminée !"
 echo "======================================================"
 echo ""
-echo " Prochaine étape : enregistrer le runner GitHub Actions"
+echo " Étapes suivantes :"
 echo ""
-echo "   1. Aller sur :"
-echo "      https://github.com/eldiablotin/poolex-control/settings/actions/runners/new"
-echo "      Sélectionner : Linux / ARM64"
+echo " 1. Ajouter le secret MQTT dans GitHub (affiché ci-dessus)"
+echo "    → https://github.com/eldiablotin/poolex-control/settings/secrets/actions"
 echo ""
-echo "   2. Copier le TOKEN affiché, puis exécuter :"
+echo " 2. Démarrer le service :"
+echo "    sudo systemctl start poolex"
+echo "    journalctl -u poolex -f"
 echo ""
-echo "      mkdir -p $RUNNER_DIR && cd $RUNNER_DIR"
-echo "      curl -o runner.tar.gz -L \\"
-echo "        https://github.com/actions/runner/releases/latest/download/actions-runner-linux-arm64.tar.gz"
-echo "      tar xzf runner.tar.gz"
-echo "      ./config.sh --url $REPO_URL --token <TOKEN>"
-echo "      sudo ./svc.sh install && sudo ./svc.sh start"
-echo ""
-echo " Démarrer le service manuellement pour tester :"
-echo "   sudo systemctl start poolex"
-echo "   journalctl -u poolex -f"
+echo " 3. Enregistrer le runner GitHub Actions (si pas encore fait) :"
+echo "    → https://github.com/eldiablotin/poolex-control/settings/actions/runners/new"
+echo "    mkdir -p $RUNNER_DIR && cd $RUNNER_DIR"
+echo "    curl -o runner.tar.gz -L \\"
+echo "      https://github.com/actions/runner/releases/latest/download/actions-runner-linux-arm64.tar.gz"
+echo "    tar xzf runner.tar.gz"
+echo "    ./config.sh --url $REPO_URL --token <TOKEN>"
+echo "    sudo ./svc.sh install pi && sudo ./svc.sh start"
 echo ""
 echo " ⚠️  Rebrancher la session SSH pour activer le groupe dialout."

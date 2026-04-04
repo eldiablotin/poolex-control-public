@@ -22,6 +22,10 @@ jobs:
         run: |
           find "$GITHUB_WORKSPACE" -maxdepth 1 -mindepth 1 ! -name '.git' \
             -exec cp -r {} /opt/poolex-control/ \;
+          # Garder le clone git à jour (utilisé pour install.sh)
+          if [ -d "$HOME/poolex-control/.git" ]; then
+            git -C "$HOME/poolex-control" pull --ff-only
+          fi
 
       - name: Write secrets env file
         run: |
