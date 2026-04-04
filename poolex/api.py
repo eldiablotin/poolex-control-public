@@ -2,10 +2,11 @@
 API REST Flask — point d'entrée principal de l'application.
 
 Endpoints :
-  GET  /status                → état courant décodé (temp eau, air, consigne)
-  GET  /frames?header=DD&limit=20  → dernières trames brutes
-  GET  /frames/stats          → comptage par type
-  POST /control/setpoint  {"temperature": 28}  → envoie une nouvelle consigne
+  GET  /status                          → état courant (temp eau, air, consigne, power)
+  GET  /frames?header=DD&limit=20       → dernières trames brutes
+  GET  /frames/stats                    → comptage par type
+  POST /control/setpoint {"temperature": 28}   → change la consigne °C
+  POST /control/power    {"state": "on"/"off"} → allume / éteint la PAC
 """
 from __future__ import annotations
 
@@ -16,7 +17,7 @@ from flask import Flask, jsonify, request
 
 from .capture import RS485Capture
 from .controller import Controller
-from .decoder import CDFrame, DDFrame
+from .decoder import DDFrame
 from .storage import Storage
 from .test_protocol import bp as test_bp
 
@@ -39,7 +40,7 @@ def _on_frame(frame):
     storage.save(frame)
 
 capture    = RS485Capture(port=SERIAL_PORT, on_frame=_on_frame)
-controller = Controller(capture)   # enveloppe _on_frame et intercepte les CD
+controller = Controller(capture)   # enveloppe _on_frame et intercepte D2/CC
 
 
 # ---------------------------------------------------------------------------
@@ -57,13 +58,13 @@ def index():
 @app.get("/status")
 def status():
     last_dd = storage.last("DD")
-    last_cd = storage.last("CD")
     return jsonify({
-        "water_temp":          last_dd.water_temp if isinstance(last_dd, DDFrame) else None,
-        "air_temp":            last_dd.air_temp   if isinstance(last_dd, DDFrame) else None,
-        "mode":                last_dd.mode_byte  if isinstance(last_dd, DDFrame) else None,
-        "setpoint":            last_cd.setpoint   if isinstance(last_cd, CDFrame) else None,
-        "controller_ready":    controller.has_template,
+        "water_temp":       last_dd.water_temp if isinstance(last_dd, DDFrame) else None,
+        "air_temp":         last_dd.air_temp   if isinstance(last_dd, DDFrame) else None,
+        "pac_mode":         last_dd.mode_byte  if isinstance(last_dd, DDFrame) else None,
+        "setpoint":         controller.setpoint,
+        "power":            controller.power,
+        "controller_ready": controller.ready,
     })
 
 
@@ -93,14 +94,29 @@ def set_setpoint():
         return jsonify({"error": "Valeur de température invalide"}), 400
 
     try:
-        sent = controller.set_temperature(temp)
+        ok = controller.set_temperature(temp)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
-    if not sent:
-        return jsonify({"error": "Pas encore de trame CD disponible comme template"}), 503
+    if not ok:
+        return jsonify({"error": "Contrôleur pas encore prêt (templates D2/CC non capturés)"}), 503
 
     return jsonify({"status": "ok", "temperature": temp})
+
+
+@app.post("/control/power")
+def set_power():
+    body = request.get_json(silent=True) or {}
+    state = body.get("state")
+
+    if state not in ("on", "off"):
+        return jsonify({"error": "Paramètre 'state' doit être 'on' ou 'off'"}), 400
+
+    ok = controller.set_power(state == "on")
+    if not ok:
+        return jsonify({"error": "Contrôleur pas encore prêt (templates D2/CC non capturés)"}), 503
+
+    return jsonify({"status": "ok", "power": state})
 
 
 # ---------------------------------------------------------------------------
@@ -109,5 +125,6 @@ def set_setpoint():
 
 def run() -> None:
     capture.start()
+    controller.start()
     logger.info("API démarrée sur le port %d", API_PORT)
     app.run(host="0.0.0.0", port=API_PORT, debug=False, use_reloader=False)

@@ -1,16 +1,14 @@
 """
-Contrôle de la PAC par injection de trames CD modifiées.
+Contrôle de la PAC par substitution complète de la télécommande filaire.
 
-Stratégie (identique à celle validée sur ESP32 dans PoolexCommand) :
-  1. Écouter passivement le bus et mémoriser la dernière trame CD reçue
-     comme template (elle contient tous les réglages courants).
-  2. Lors d'une demande de changement de consigne :
-     - Copier le template
-     - Modifier byte[11] = nouvelle température
-     - Injecter la trame sur le bus après un délai inter-trame
+La télécommande filaire doit être débranchée. Le RPi envoie D2 et CC
+en continu à ~1/s, exactement comme le faisait la télécommande.
 
-Octet de contrôle identifié :
-  CD byte[11] → consigne température °C (confirmé par analyse + ESP32)
+Protocole confirmé avr 2026 :
+  D2/CC/CD byte[11]        → consigne température °C
+  D2/CC/CD byte[1] bit 0   → état on/off  (0=arrêt, 1=allumage)
+  DD byte[3]               → état PAC en retour (0xa1=chauffe, 0x21=standby,
+                             0x20=arrêt en cours, 0x00=éteint)
 """
 from __future__ import annotations
 
@@ -20,89 +18,148 @@ import time
 from typing import Optional
 
 from .capture import RS485Capture
-from .decoder import CDFrame, Frame
+from .decoder import Frame
 
 logger = logging.getLogger(__name__)
-
-# Délai avant émission pour s'assurer que le bus est calme
-# (intervalle inter-trame observé ≈ 333 ms, on attend 30 ms après réception)
-_TRANSMIT_DELAY = 0.03  # secondes
 
 SETPOINT_MIN = 10
 SETPOINT_MAX = 40
 
+# Intervalle d'envoi D2/CC (la télécommande émet ~1 trame/s par type)
+_SEND_INTERVAL = 1.0
+
 
 class Controller:
-    """Contrôle la PAC en injectant des trames CD modifiées."""
+    """
+    Remplace la télécommande filaire sur le bus RS485.
+
+    Envoie D2 et CC en continu à 1/s avec les consignes courantes.
+    """
 
     def __init__(self, capture: RS485Capture) -> None:
         self._capture = capture
-        self._last_cd: Optional[CDFrame] = None
         self._lock = threading.Lock()
 
-        # Chaîner avec le callback existant pour intercepter les trames CD
+        # Templates D2 et CC (capturés depuis le bus au démarrage)
+        self._d2_template: Optional[bytearray] = None
+        self._cc_template: Optional[bytearray] = None
+
+        # État courant
+        self._setpoint: Optional[int] = None
+        self._power: Optional[bool] = None  # True=on, False=off
+
+        # Intercepte les trames D2/CC pour les capturer comme templates
         _prev = capture.on_frame
 
         def _intercept(frame: Frame) -> None:
-            if isinstance(frame, CDFrame):
-                with self._lock:
-                    self._last_cd = frame
-                logger.debug("Template CD mis à jour : consigne=%d°C", frame.setpoint)
+            with self._lock:
+                if frame.raw[0] == 0xD2 and self._d2_template is None:
+                    self._d2_template = bytearray(frame.raw)
+                    self._setpoint = frame.raw[11]
+                    self._power = bool(frame.raw[1] & 0x01)
+                    logger.info(
+                        "Template D2 capturé: consigne=%d°C power=%s b1=0x%02x",
+                        self._setpoint, self._power, frame.raw[1]
+                    )
+                elif frame.raw[0] == 0xCC and self._cc_template is None:
+                    self._cc_template = bytearray(frame.raw)
+                    logger.info("Template CC capturé")
             if _prev:
                 _prev(frame)
 
         capture.on_frame = _intercept
 
+        # Thread d'émission continu
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+
     # ------------------------------------------------------------------ #
-    #  État                                                                #
+    #  Cycle de vie                                                        #
     # ------------------------------------------------------------------ #
 
-    @property
-    def has_template(self) -> bool:
-        return self._last_cd is not None
+    def start(self) -> None:
+        """Démarre le thread d'émission (attend que les templates soient prêts)."""
+        self._running = True
+        self._thread = threading.Thread(
+            target=self._send_loop, daemon=True, name="rs485-controller"
+        )
+        self._thread.start()
+        logger.info("Contrôleur démarré (en attente des templates D2/CC)")
+
+    def stop(self) -> None:
+        self._running = False
+        if self._thread:
+            self._thread.join(timeout=3)
 
     @property
-    def current_setpoint(self) -> Optional[int]:
+    def ready(self) -> bool:
+        """True quand les templates D2 et CC ont été capturés."""
+        return self._d2_template is not None and self._cc_template is not None
+
+    @property
+    def setpoint(self) -> Optional[int]:
         with self._lock:
-            return self._last_cd.setpoint if self._last_cd else None
+            return self._setpoint
+
+    @property
+    def power(self) -> Optional[bool]:
+        with self._lock:
+            return self._power
 
     # ------------------------------------------------------------------ #
-    #  Commande                                                            #
+    #  Commandes                                                           #
     # ------------------------------------------------------------------ #
 
     def set_temperature(self, temperature: int) -> bool:
-        """
-        Envoie une trame CD modifiée pour changer la consigne.
-
-        Returns:
-            True  si la trame a été envoyée.
-            False si aucune trame CD n'a encore été reçue (pas de template).
-
-        Raises:
-            ValueError si la température est hors plage.
-        """
+        """Change la consigne de température (10–40°C)."""
         if not (SETPOINT_MIN <= temperature <= SETPOINT_MAX):
             raise ValueError(
-                f"Température {temperature}°C hors plage "
-                f"({SETPOINT_MIN}-{SETPOINT_MAX}°C)"
+                f"Température {temperature}°C hors plage ({SETPOINT_MIN}-{SETPOINT_MAX}°C)"
             )
-
         with self._lock:
-            if self._last_cd is None:
-                logger.warning(
-                    "Aucune trame CD reçue — impossible d'envoyer la consigne"
-                )
+            if not self.ready:
                 return False
-            frame = bytearray(self._last_cd.raw)
+            self._setpoint = temperature
+            self._d2_template[11] = temperature
+            self._cc_template[11] = temperature
+        logger.info("Consigne mise à jour: %d°C", temperature)
+        return True
 
-        # Modifier uniquement la consigne (byte[11])
-        frame[11] = temperature
+    def set_power(self, on: bool) -> bool:
+        """Allume (True) ou éteint (False) la PAC."""
+        with self._lock:
+            if not self.ready:
+                return False
+            self._power = on
+            if on:
+                self._d2_template[1] |= 0x01   # bit 0 = 1 → allumage
+                self._cc_template[1] |= 0x01
+            else:
+                self._d2_template[1] &= 0xFE   # bit 0 = 0 → arrêt
+                self._cc_template[1] &= 0xFE
+        logger.info("Commande power: %s", "ON" if on else "OFF")
+        return True
 
-        time.sleep(_TRANSMIT_DELAY)
-        try:
-            self._capture.send(bytes(frame))
-            logger.info("Consigne envoyée : %d°C", temperature)
-            return True
-        except Exception:
-            logger.exception("Erreur lors de l'envoi de la consigne")
-            return False
+    # ------------------------------------------------------------------ #
+    #  Boucle d'émission                                                  #
+    # ------------------------------------------------------------------ #
+
+    def _send_loop(self) -> None:
+        while self._running:
+            with self._lock:
+                ready = self.ready
+                d2 = bytes(self._d2_template) if self._d2_template else None
+                cc = bytes(self._cc_template) if self._cc_template else None
+
+            if not ready:
+                time.sleep(0.5)
+                continue
+
+            try:
+                self._capture.send(d2)
+                time.sleep(_SEND_INTERVAL / 2)
+                self._capture.send(cc)
+                time.sleep(_SEND_INTERVAL / 2)
+            except Exception:
+                logger.exception("Erreur lors de l'envoi des trames de contrôle")
+                time.sleep(1)
