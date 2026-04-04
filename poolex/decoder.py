@@ -16,12 +16,15 @@ Décodages confirmés :
   DD byte[20] / 2  → température air extérieur (°C) ex:  26 → 13.0°C  ✓ avr 2026
   CD byte[11]      → consigne température (°C)                         ✓ été 2025
 
+byte[79] observé :
+  DD  : compteur roulant (0x42…0x54…)
+  D2  : valeur variable (0x8d, 0x8f…) — probablement compteur ou checksum
+  CC  : valeur variable (0x87, 0x89…) — probablement compteur ou checksum
+  CD  : à confirmer (0xCD ou 0xCE selon ancienne analyse)
+
 Bytes à préciser :
   DD byte[22] / 2  → valeur proche temp eau (2ème capteur ? eau de sortie ?)
   DD byte[3]       → mode de fonctionnement (flags, décodage en cours)
-
-Note : l'analyse été 2025 (23 452 trames) avait identifié byte[22]/2 → eau et byte[29] → air,
-mais les validations terrain avr 2026 montrent byte[29]/10 → eau et byte[20]/2 → air.
 """
 from __future__ import annotations
 
@@ -47,13 +50,8 @@ class Frame:
         if len(self.raw) != FRAME_SIZE or self.raw[0] != self.header:
             return False
         match self.header:
-            case 0xD2 | 0xCC:
-                return self.raw[79] == self.header
-            case 0xCD:
-                # byte[79] observé à 0xCD ou 0xCE selon les trames capturées
-                return self.raw[79] in (0xCD, 0xCE)
-            case 0xDD:
-                return True  # byte[79] = compteur roulant, pas de marqueur fixe
+            case 0xD2 | 0xCC | 0xCD | 0xDD:
+                return True  # byte[79] varie selon le type (compteur/checksum) — pas de marqueur fixe fiable
         return False
 
 
