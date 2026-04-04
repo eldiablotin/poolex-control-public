@@ -15,10 +15,13 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from .capture import RS485Capture
 from .decoder import Frame
+
+if TYPE_CHECKING:
+    from .storage import Storage
 
 logger = logging.getLogger(__name__)
 
@@ -34,13 +37,15 @@ class Controller:
     Remplace la télécommande filaire sur le bus RS485.
 
     Envoie D2 et CC en continu à 1/s avec les consignes courantes.
+    Si storage est fourni, charge les derniers templates D2/CC depuis la DB
+    au démarrage (utile quand la télécommande filaire est absente du bus).
     """
 
-    def __init__(self, capture: RS485Capture) -> None:
+    def __init__(self, capture: RS485Capture, storage: "Storage | None" = None) -> None:
         self._capture = capture
         self._lock = threading.Lock()
 
-        # Templates D2 et CC (capturés depuis le bus au démarrage)
+        # Templates D2 et CC
         self._d2_template: Optional[bytearray] = None
         self._cc_template: Optional[bytearray] = None
 
@@ -48,7 +53,23 @@ class Controller:
         self._setpoint: Optional[int] = None
         self._power: Optional[bool] = None  # True=on, False=off
 
-        # Intercepte les trames D2/CC pour les capturer comme templates
+        # Amorçage depuis la DB si disponible
+        if storage is not None:
+            d2 = storage.last("D2")
+            cc = storage.last("CC")
+            if d2 is not None:
+                self._d2_template = bytearray(d2.raw)
+                self._setpoint = d2.raw[11]
+                self._power = bool(d2.raw[1] & 0x01)
+                logger.info(
+                    "Template D2 chargé depuis DB: consigne=%d°C power=%s b1=0x%02x",
+                    self._setpoint, self._power, d2.raw[1],
+                )
+            if cc is not None:
+                self._cc_template = bytearray(cc.raw)
+                logger.info("Template CC chargé depuis DB")
+
+        # Intercepte les trames D2/CC pour les rafraîchir si la télécommande est présente
         _prev = capture.on_frame
 
         def _intercept(frame: Frame) -> None:
@@ -58,12 +79,12 @@ class Controller:
                     self._setpoint = frame.raw[11]
                     self._power = bool(frame.raw[1] & 0x01)
                     logger.info(
-                        "Template D2 capturé: consigne=%d°C power=%s b1=0x%02x",
+                        "Template D2 capturé (bus): consigne=%d°C power=%s b1=0x%02x",
                         self._setpoint, self._power, frame.raw[1]
                     )
                 elif frame.raw[0] == 0xCC and self._cc_template is None:
                     self._cc_template = bytearray(frame.raw)
-                    logger.info("Template CC capturé")
+                    logger.info("Template CC capturé (bus)")
             if _prev:
                 _prev(frame)
 

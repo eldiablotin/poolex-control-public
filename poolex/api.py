@@ -40,7 +40,7 @@ def _on_frame(frame):
     storage.save(frame)
 
 capture    = RS485Capture(port=SERIAL_PORT, on_frame=_on_frame)
-controller = Controller(capture)   # enveloppe _on_frame et intercepte D2/CC
+controller = Controller(capture, storage=storage)   # charge templates D2/CC depuis DB si télécommande absente
 
 
 # ---------------------------------------------------------------------------
