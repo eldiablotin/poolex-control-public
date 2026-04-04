@@ -30,6 +30,7 @@ echo "[2/7] Configuration mosquitto + utilisateur MQTT 'poolex'..."
 
 MQTT_PASS="$(openssl rand -hex 20)"
 sudo mosquitto_passwd -c -b /etc/mosquitto/passwd poolex "${MQTT_PASS}"
+sudo chown mosquitto:mosquitto /etc/mosquitto/passwd
 
 # Remplacer entièrement mosquitto.conf par une config minimale mosquitto 2.x
 # (évite tout conflit avec conf.d ou les valeurs par défaut Debian)
