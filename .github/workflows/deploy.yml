@@ -1,5 +1,16 @@
 name: Deploy
 
+# Ce workflow déploie automatiquement sur un Raspberry Pi via un runner
+# GitHub Actions self-hosted installé sur le RPi.
+#
+# Prérequis :
+#   - Runner self-hosted enregistré (voir README section 7)
+#   - Secrets GitHub configurés :
+#       GH_PAT              : Personal Access Token (pour le checkout privé)
+#       POOLEX_MQTT_PASSWORD : Mot de passe du broker MQTT
+#
+# Pour un déploiement manuel sans CI/CD, voir README section 7.
+
 on:
   push:
     branches: [main]
@@ -36,7 +47,6 @@ jobs:
       - name: Setup venv and install dependencies
         run: |
           if [ ! -f /opt/poolex-control/venv/bin/python ]; then
-            echo "Création du virtualenv..."
             python3 -m venv /opt/poolex-control/venv
           fi
           /opt/poolex-control/venv/bin/pip install -r /opt/poolex-control/requirements.txt -q

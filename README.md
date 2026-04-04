@@ -483,51 +483,53 @@ pour s'y connecter plutôt qu'au broker local :
 
 ## 7. Mise en place GitHub Actions
 
-À chaque `git push` sur `main` : CI (lint + tests) puis déploiement automatique sur le RPi.
+Deux workflows sont fournis :
 
-### Runner self-hosted
+| Workflow | Déclencheur | Runner | Rôle |
+|----------|------------|--------|------|
+| `ci.yml` | Tout push | `ubuntu-latest` (GitHub) | Lint ruff + tests pytest |
+| `deploy.yml` | Push sur `main` | Self-hosted (RPi) | Déploiement automatique |
+
+Le CI fonctionne sans configuration. Le deploy nécessite un runner self-hosted sur le RPi.
+
+### Secrets GitHub requis
+
+| Secret | Description |
+|--------|-------------|
+| `GH_PAT` | Personal Access Token avec scope `repo` (pour le checkout self-hosted) |
+| `POOLEX_MQTT_PASSWORD` | Mot de passe MQTT — généré par `install.sh` |
+
+### Installer le runner self-hosted sur le RPi
 
 Sur GitHub → repo → Settings → Actions → Runners → **New self-hosted runner** (Linux / ARM64).
 
-Sur le RPi :
+Sur le RPi (en tant que `pi`, **jamais root**) :
 
 ```bash
 mkdir -p ~/actions-runner && cd ~/actions-runner
 curl -o runner.tar.gz -L \
   https://github.com/actions/runner/releases/latest/download/actions-runner-linux-arm64.tar.gz
 tar xzf runner.tar.gz
-./config.sh --url https://github.com/eldiablotin/poolex-control --token <TOKEN>
+./config.sh --url https://github.com/<vous>/<repo> --token <TOKEN>
+
+# Installer et activer comme service systemd
+sudo ./svc.sh install pi
+sudo ./svc.sh start
 ```
 
-Créer le service systemd **en tant que `pi`** (le runner refuse de tourner en root) :
+> `concurrency: cancel-in-progress: true` dans `deploy.yml` annule les jobs en attente
+> si un nouveau push arrive — évite qu'un déploiement obsolète écrase une version plus récente.
 
-```ini
-# /etc/systemd/system/runner-poolex.service
-[Unit]
-Description=GitHub Actions Runner - poolex-control
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=pi
-WorkingDirectory=/home/pi/actions-runner
-ExecStart=/home/pi/actions-runner/run.sh
-Restart=on-failure
-RestartSec=5s
-
-[Install]
-WantedBy=multi-user.target
-```
+### Déploiement manuel (sans CI/CD)
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now runner-poolex
+# Sur le RPi
+cd ~/poolex-control
+git pull
+find . -maxdepth 1 -mindepth 1 ! -name '.git' -exec cp -r {} /opt/poolex-control/ \;
+/opt/poolex-control/venv/bin/pip install -r /opt/poolex-control/requirements.txt -q
+sudo systemctl restart poolex
 ```
-
-> La directive `concurrency: cancel-in-progress: true` dans `deploy.yml` annule les
-> anciens jobs quand un nouveau push arrive — évite qu'un déploiement antérieur
-> écrase une version plus récente si le runner était offline.
 
 ---
 
