@@ -54,7 +54,14 @@ mqtt_client = MQTTClient(controller, storage)
 def index():
     return jsonify({
         "service": "poolex-control",
-        "endpoints": ["/status", "/frames", "/frames/stats", "/control/setpoint"],
+        "endpoints": [
+            "GET  /status",
+            "GET  /frames?header=DD&limit=20",
+            "GET  /frames/stats",
+            "POST /control/setpoint  {temperature: int}",
+            "POST /control/power     {state: on|off}",
+            "POST /control/mode      {mode: inverter|fix|sun|cooling}",
+        ],
     })
 
 

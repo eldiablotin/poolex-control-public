@@ -1,30 +1,21 @@
 """
-Décodage des trames RS485 de la pompe à chaleur.
+Décodage des trames RS485 de la pompe à chaleur (80 octets, 9600 baud 8N1).
 
-Structure des trames (80 octets, 9600 baud 8N1) :
-  Byte[0]  : header (0xDD / 0xD2 / 0xCC / 0xCD)
-  Byte[79] : marqueur de fin = header répété (sauf DD où c'est un compteur)
+Rôles des trames — confirmés avr 2026 :
+  0xDD  PAC → remote  : statut live (températures, état)        ~1/s
+  0xD2  PAC → remote  : config broadcast (consigne, mode, power) ~1/s  ← maître bus
+  0xCC  remote → PAC  : keepalive/ACK en réponse à chaque D2
+  0xCD  remote → PAC  : commande (setpoint, power, mode)        burst x8
 
-Trames identifiées :
-  0xDD  PAC → télécommande  : données capteurs temps réel
-  0xD2  télécommande → PAC  : configuration / consignes (appareil A)
-  0xCC  télécommande → PAC  : configuration / consignes (appareil B, contenu identique à D2)
-  0xCD  télécommande → PAC  : trame de commande (rare, modification consigne)
+Décodages confirmés avr 2026 :
+  DD byte[29] / 10 → température eau piscine °C  (ex: 114 → 11.4°C)
+  DD byte[20] / 2  → température air extérieur °C (ex:  26 → 13.0°C)
+  DD byte[3]       → état PAC (0xa1=chauffe, 0x21=standby, 0x20=arrêt, 0x00=éteint)
+  D2/CD byte[11]   → consigne température °C
+  D2/CD byte[1]    → mode + power  (bit0: 0=off 1=on ; bits4-6: 0x1b/0x3b/0x5b=mode)
+  D2/CD byte[4]    → sous-mode     (0x01=normal, 0x02=cooling)
 
-Décodages confirmés :
-  DD byte[29] / 10 → température eau piscine (°C)   ex: 114 → 11.4°C  ✓ avr 2026
-  DD byte[20] / 2  → température air extérieur (°C) ex:  26 → 13.0°C  ✓ avr 2026
-  CD byte[11]      → consigne température (°C)                         ✓ été 2025
-
-byte[79] observé :
-  DD  : compteur roulant (0x42…0x54…)
-  D2  : valeur variable (0x8d, 0x8f…) — probablement compteur ou checksum
-  CC  : valeur variable (0x87, 0x89…) — probablement compteur ou checksum
-  CD  : à confirmer (0xCD ou 0xCE selon ancienne analyse)
-
-Bytes à préciser :
-  DD byte[22] / 2  → valeur proche temp eau (2ème capteur ? eau de sortie ?)
-  DD byte[3]       → mode de fonctionnement (flags, décodage en cours)
+  Checksum byte[79] = (sum(bytes[0..78]) + 0xAF) & 0xFF  — toujours recalculer après modif.
 """
 from __future__ import annotations
 
