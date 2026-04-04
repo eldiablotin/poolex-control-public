@@ -23,6 +23,12 @@ jobs:
           find "$GITHUB_WORKSPACE" -maxdepth 1 -mindepth 1 ! -name '.git' \
             -exec cp -r {} /opt/poolex-control/ \;
 
+      - name: Write secrets env file
+        run: |
+          printf 'POOLEX_MQTT_PASSWORD=%s\n' '${{ secrets.POOLEX_MQTT_PASSWORD }}' \
+            > /opt/poolex-control/poolex.env
+          chmod 600 /opt/poolex-control/poolex.env
+
       - name: Setup venv and install dependencies
         run: |
           if [ ! -f /opt/poolex-control/venv/bin/python ]; then

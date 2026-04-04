@@ -11,9 +11,9 @@ Environment="POOLEX_DB_PATH=/var/lib/poolex/poolex.db"
 Environment="POOLEX_API_PORT=5000"
 Environment="POOLEX_MQTT_HOST=localhost"
 Environment="POOLEX_MQTT_PORT=1883"
-# Environment="POOLEX_MQTT_USER=poolex"
-# Environment="POOLEX_MQTT_PASSWORD=secret"
+Environment="POOLEX_MQTT_USER=poolex"
 Environment="POOLEX_MQTT_PREFIX=poolex"
+EnvironmentFile=-/opt/poolex-control/poolex.env
 ExecStart=/opt/poolex-control/venv/bin/python -m poolex
 Restart=on-failure
 RestartSec=15s

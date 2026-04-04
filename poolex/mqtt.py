@@ -6,7 +6,7 @@ Variables d'environnement :
   POOLEX_MQTT_PORT     : port (défaut: 1883)
   POOLEX_MQTT_USER     : utilisateur (optionnel)
   POOLEX_MQTT_PASSWORD : mot de passe (optionnel)
-  POOLEX_MQTT_PREFIX   : préfixe des topics (défaut: poolex)
+  POOLEX_self._prefix   : préfixe des topics (défaut: poolex)
 
 Entités Home Assistant créées :
   - climate   : contrôle on/off + consigne + température courante
@@ -23,6 +23,7 @@ import time
 from typing import TYPE_CHECKING
 
 import paho.mqtt.client as mqtt
+from paho.mqtt.client import CallbackAPIVersion
 
 from .controller import MODES
 
@@ -33,14 +34,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Configuration
+# Configuration (lue au démarrage pour prendre en compte les variables
+# injectées par systemd EnvironmentFile)
 # ---------------------------------------------------------------------------
-
-MQTT_HOST     = os.environ.get("POOLEX_MQTT_HOST", "localhost")
-MQTT_PORT     = int(os.environ.get("POOLEX_MQTT_PORT", "1883"))
-MQTT_USER     = os.environ.get("POOLEX_MQTT_USER", "")
-MQTT_PASSWORD = os.environ.get("POOLEX_MQTT_PASSWORD", "")
-MQTT_PREFIX   = os.environ.get("POOLEX_MQTT_PREFIX", "poolex")
 
 HA_PREFIX   = "homeassistant"
 DEVICE_ID   = "poolex_pac"
@@ -59,13 +55,21 @@ class MQTTClient:
         self._controller = controller
         self._storage    = storage
 
+        # Configuration lue à l'instanciation (env vars disponibles au runtime)
+        self._host   = os.environ.get("POOLEX_MQTT_HOST", "localhost")
+        self._port   = int(os.environ.get("POOLEX_MQTT_PORT", "1883"))
+        self._user   = os.environ.get("POOLEX_MQTT_USER", "")
+        self._pass   = os.environ.get("POOLEX_MQTT_PASSWORD", "")
+        self._prefix = os.environ.get("POOLEX_self._prefix", "poolex")
+
         self._client = mqtt.Client(
+            CallbackAPIVersion.VERSION1,
             client_id="poolex-control",
             clean_session=True,
             protocol=mqtt.MQTTv311,
         )
-        if MQTT_USER:
-            self._client.username_pw_set(MQTT_USER, MQTT_PASSWORD)
+        if self._user:
+            self._client.username_pw_set(self._user, self._pass)
 
         self._client.on_connect    = self._on_connect
         self._client.on_disconnect = self._on_disconnect
@@ -81,16 +85,16 @@ class MQTTClient:
     def start(self) -> None:
         self._running = True
         try:
-            self._client.connect(MQTT_HOST, MQTT_PORT, keepalive=60)
+            self._client.connect(self._host, self._port, keepalive=60)
         except Exception:
-            logger.exception("Impossible de se connecter au broker MQTT %s:%d", MQTT_HOST, MQTT_PORT)
+            logger.exception("Impossible de se connecter au broker MQTT %s:%d", self._host, self._port)
             return
         self._client.loop_start()
         self._thread = threading.Thread(
             target=self._publish_loop, daemon=True, name="mqtt-publisher"
         )
         self._thread.start()
-        logger.info("MQTT démarré → %s:%d (prefix=%s)", MQTT_HOST, MQTT_PORT, MQTT_PREFIX)
+        logger.info("MQTT démarré → %s:%d (prefix=%s)", self._host, self._port, self._prefix)
 
     def stop(self) -> None:
         self._running = False
@@ -109,12 +113,12 @@ class MQTTClient:
         self._publish_discovery()
         # Abonnements aux commandes
         client.subscribe([
-            (f"{MQTT_PREFIX}/control/setpoint",    0),
-            (f"{MQTT_PREFIX}/control/power",       0),
-            (f"{MQTT_PREFIX}/control/mode",        0),
+            (f"{self._prefix}/control/setpoint",    0),
+            (f"{self._prefix}/control/power",       0),
+            (f"{self._prefix}/control/mode",        0),
             # Topics climate HA
-            (f"{MQTT_PREFIX}/climate/temperature/set", 0),
-            (f"{MQTT_PREFIX}/climate/mode/set",    0),
+            (f"{self._prefix}/climate/temperature/set", 0),
+            (f"{self._prefix}/climate/mode/set",    0),
         ])
 
     def _on_disconnect(self, client, userdata, rc) -> None:
@@ -127,15 +131,15 @@ class MQTTClient:
         logger.debug("MQTT reçu %s = %r", topic, payload)
 
         try:
-            if topic in (f"{MQTT_PREFIX}/control/setpoint",
-                         f"{MQTT_PREFIX}/climate/temperature/set"):
+            if topic in (f"{self._prefix}/control/setpoint",
+                         f"{self._prefix}/climate/temperature/set"):
                 temp = int(float(payload))
                 ok   = self._controller.set_temperature(temp)
                 if ok:
                     self.publish_status()
 
-            elif topic in (f"{MQTT_PREFIX}/control/power",
-                           f"{MQTT_PREFIX}/climate/mode/set"):
+            elif topic in (f"{self._prefix}/control/power",
+                           f"{self._prefix}/climate/mode/set"):
                 # climate mode: "off" → power off ; tout autre → power on
                 if payload.lower() == "off":
                     ok = self._controller.set_power(False)
@@ -149,7 +153,7 @@ class MQTTClient:
                 if ok:
                     self.publish_status()
 
-            elif topic == f"{MQTT_PREFIX}/control/mode":
+            elif topic == f"{self._prefix}/control/mode":
                 if payload not in MODES:
                     logger.warning("Mode inconnu: %r", payload)
                     return
@@ -176,7 +180,7 @@ class MQTTClient:
         setpoint = self._controller.setpoint
 
         # Topic de statut agrégé
-        self._publish(f"{MQTT_PREFIX}/status", json.dumps({
+        self._publish(f"{self._prefix}/status", json.dumps({
             "water_temp":  water_temp,
             "air_temp":    air_temp,
             "setpoint":    setpoint,
@@ -187,25 +191,25 @@ class MQTTClient:
 
         # Topics individuels (pour HA)
         if water_temp is not None:
-            self._publish(f"{MQTT_PREFIX}/water_temp", str(water_temp))
+            self._publish(f"{self._prefix}/water_temp", str(water_temp))
         if air_temp is not None:
-            self._publish(f"{MQTT_PREFIX}/air_temp", str(air_temp))
+            self._publish(f"{self._prefix}/air_temp", str(air_temp))
         if setpoint is not None:
-            self._publish(f"{MQTT_PREFIX}/setpoint", str(setpoint))
+            self._publish(f"{self._prefix}/setpoint", str(setpoint))
         if power is not None:
-            self._publish(f"{MQTT_PREFIX}/power", "on" if power else "off")
+            self._publish(f"{self._prefix}/power", "on" if power else "off")
         if mode is not None:
-            self._publish(f"{MQTT_PREFIX}/mode", mode)
+            self._publish(f"{self._prefix}/mode", mode)
 
         # État climate HA : "heat" si allumé, "off" si éteint
         ha_mode = "off"
         if power:
             ha_mode = "heat"
-        self._publish(f"{MQTT_PREFIX}/climate/mode/state", ha_mode)
+        self._publish(f"{self._prefix}/climate/mode/state", ha_mode)
         if setpoint is not None:
-            self._publish(f"{MQTT_PREFIX}/climate/temperature/state", str(setpoint))
+            self._publish(f"{self._prefix}/climate/temperature/state", str(setpoint))
         if water_temp is not None:
-            self._publish(f"{MQTT_PREFIX}/climate/current_temperature", str(water_temp))
+            self._publish(f"{self._prefix}/climate/current_temperature", str(water_temp))
 
     def _publish_loop(self) -> None:
         while self._running:
@@ -239,19 +243,19 @@ class MQTTClient:
                 "device":       device,
 
                 "modes":        ["off", "heat"],
-                "mode_state_topic":   f"{MQTT_PREFIX}/climate/mode/state",
-                "mode_command_topic": f"{MQTT_PREFIX}/climate/mode/set",
+                "mode_state_topic":   f"{self._prefix}/climate/mode/state",
+                "mode_command_topic": f"{self._prefix}/climate/mode/set",
 
-                "temperature_state_topic":   f"{MQTT_PREFIX}/climate/temperature/state",
-                "temperature_command_topic": f"{MQTT_PREFIX}/climate/temperature/set",
+                "temperature_state_topic":   f"{self._prefix}/climate/temperature/state",
+                "temperature_command_topic": f"{self._prefix}/climate/temperature/set",
                 "temperature_unit":  "C",
                 "min_temp":          8,
                 "max_temp":          40,
                 "temp_step":         1,
 
-                "current_temperature_topic": f"{MQTT_PREFIX}/climate/current_temperature",
+                "current_temperature_topic": f"{self._prefix}/climate/current_temperature",
 
-                "availability_topic": f"{MQTT_PREFIX}/status",
+                "availability_topic": f"{self._prefix}/status",
                 "availability_template": "{{ 'online' if value_json.controller_ready else 'offline' }}",
             }),
             retain=True,
@@ -267,10 +271,10 @@ class MQTTClient:
                 "icon":         "mdi:heat-wave",
 
                 "options":      list(MODES.keys()),
-                "state_topic":  f"{MQTT_PREFIX}/mode",
-                "command_topic": f"{MQTT_PREFIX}/control/mode",
+                "state_topic":  f"{self._prefix}/mode",
+                "command_topic": f"{self._prefix}/control/mode",
 
-                "availability_topic": f"{MQTT_PREFIX}/status",
+                "availability_topic": f"{self._prefix}/status",
                 "availability_template": "{{ 'online' if value_json.controller_ready else 'offline' }}",
             }),
             retain=True,
@@ -285,7 +289,7 @@ class MQTTClient:
                 "device":              device,
                 "device_class":        "temperature",
                 "unit_of_measurement": "°C",
-                "state_topic":         f"{MQTT_PREFIX}/water_temp",
+                "state_topic":         f"{self._prefix}/water_temp",
                 "state_class":         "measurement",
             }),
             retain=True,
@@ -300,7 +304,7 @@ class MQTTClient:
                 "device":              device,
                 "device_class":        "temperature",
                 "unit_of_measurement": "°C",
-                "state_topic":         f"{MQTT_PREFIX}/air_temp",
+                "state_topic":         f"{self._prefix}/air_temp",
                 "state_class":         "measurement",
             }),
             retain=True,

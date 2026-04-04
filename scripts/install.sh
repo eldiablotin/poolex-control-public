@@ -21,25 +21,50 @@ echo "======================================================"
 
 # 1. Paquets système
 echo ""
-echo "[1/6] Mise à jour et installation des paquets système..."
+echo "[1/7] Mise à jour et installation des paquets système..."
 sudo apt-get update -q
-sudo apt-get install -y python3 python3-venv git
+sudo apt-get install -y python3 python3-venv git mosquitto mosquitto-clients
 
-# 2. Groupe dialout (accès /dev/ttyUSB0 sans sudo)
+# 2. Utilisateur MQTT mosquitto
 echo ""
-echo "[2/6] Ajout de $SERVICE_USER au groupe dialout..."
+echo "[2/7] Création de l'utilisateur MQTT 'poolex'..."
+MQTT_PASS="$(tr -dc 'A-Za-z0-9!#%&*+-' </dev/urandom | head -c 24)"
+sudo mosquitto_passwd -c /etc/mosquitto/passwd poolex <<< "${MQTT_PASS}
+${MQTT_PASS}"
+# Activer l'authentification dans mosquitto
+cat <<MCONF | sudo tee /etc/mosquitto/conf.d/auth.conf > /dev/null
+allow_anonymous false
+password_file /etc/mosquitto/passwd
+MCONF
+sudo systemctl restart mosquitto
+echo ""
+echo "  *** MOT DE PASSE MQTT GÉNÉRÉ (À COPIER DANS GITHUB SECRETS) ***"
+echo "      Nom du secret : POOLEX_MQTT_PASSWORD"
+echo "      Valeur        : ${MQTT_PASS}"
+echo "  → https://github.com/eldiablotin/poolex-control/settings/secrets/actions"
+echo ""
+# Créer l'env file local immédiatement pour le premier démarrage
+sudo mkdir -p "$DEPLOY_DIR"
+printf 'POOLEX_MQTT_PASSWORD=%s\n' "${MQTT_PASS}" | sudo tee /opt/poolex-control/poolex.env > /dev/null
+sudo chmod 600 /opt/poolex-control/poolex.env
+
+# 3. Groupe dialout (accès /dev/ttyUSB0 sans sudo)
+echo ""
+echo "[3/7] Ajout de $SERVICE_USER au groupe dialout..."
 sudo usermod -a -G dialout "$SERVICE_USER"
 echo "      (reconnexion SSH nécessaire pour que ce changement prenne effet)"
 
-# 3. Répertoires de déploiement et de données
+# 4. Répertoires de déploiement et de données
 echo ""
-echo "[3/6] Création des répertoires..."
+echo "[4/7] Création des répertoires..."
 sudo mkdir -p "$DEPLOY_DIR" "$DATA_DIR"
 sudo chown "$SERVICE_USER:$SERVICE_USER" "$DEPLOY_DIR" "$DATA_DIR"
+# poolex.env déjà créé à l'étape 2, ajuster l'ownership
+sudo chown root:"$SERVICE_USER" /opt/poolex-control/poolex.env
 
-# 4. Environnement virtuel Python
+# 5. Environnement virtuel Python
 echo ""
-echo "[4/6] Création du virtualenv et installation des dépendances..."
+echo "[5/7] Création du virtualenv et installation des dépendances..."
 python3 -m venv "$DEPLOY_DIR/venv"
 "$DEPLOY_DIR/venv/bin/pip" install --upgrade pip -q
 "$DEPLOY_DIR/venv/bin/pip" install -r "$REPO_DIR/requirements.txt" -q
@@ -47,17 +72,17 @@ python3 -m venv "$DEPLOY_DIR/venv"
 # Déploiement initial des fichiers
 cp -r "$REPO_DIR/." "$DEPLOY_DIR/"
 
-# 5. Service systemd
+# 6. Service systemd
 echo ""
-echo "[5/6] Installation du service systemd..."
+echo "[6/7] Installation du service systemd..."
 sed "s/__SERVICE_USER__/$SERVICE_USER/" "$REPO_DIR/scripts/poolex.service" \
     | sudo tee /etc/systemd/system/poolex.service > /dev/null
 sudo systemctl daemon-reload
 sudo systemctl enable poolex
 
-# 6. Sudoers : uniquement le restart du service (sans mot de passe pour le runner)
+# 7. Sudoers : uniquement le restart du service (sans mot de passe pour le runner)
 echo ""
-echo "[6/6] Configuration sudoers (systemctl restart poolex)..."
+echo "[7/7] Configuration sudoers (systemctl restart poolex)..."
 printf '%s ALL=(ALL) NOPASSWD: /usr/bin/systemctl daemon-reload\n' "$SERVICE_USER" \
     | sudo tee    /etc/sudoers.d/poolex > /dev/null
 printf '%s ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart poolex\n' "$SERVICE_USER" \
