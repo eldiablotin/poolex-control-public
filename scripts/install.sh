@@ -28,7 +28,7 @@ sudo apt-get install -y python3 python3-venv git mosquitto mosquitto-clients
 # 2. Utilisateur MQTT mosquitto
 echo ""
 echo "[2/7] Création de l'utilisateur MQTT 'poolex'..."
-MQTT_PASS="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32)"
+MQTT_PASS="$(openssl rand -hex 20)"
 sudo mosquitto_passwd -c -b /etc/mosquitto/passwd poolex "${MQTT_PASS}"
 # Activer l'authentification dans mosquitto
 cat <<MCONF | sudo tee /etc/mosquitto/conf.d/auth.conf > /dev/null
