@@ -31,20 +31,21 @@ echo "[2/7] Configuration mosquitto + utilisateur MQTT 'poolex'..."
 MQTT_PASS="$(openssl rand -hex 20)"
 sudo mosquitto_passwd -c -b /etc/mosquitto/passwd poolex "${MQTT_PASS}"
 
-# Nettoyer les anciens fichiers de conf qui pourraient créer des doublons
-sudo rm -f /etc/mosquitto/conf.d/auth.conf
-# Supprimer password_file du mosquitto.conf principal s'il y en a un
-sudo sed -i '/^password_file/d' /etc/mosquitto/mosquitto.conf
-
-# mosquitto 2.x exige un listener explicite quand allow_anonymous=false
-cat <<'MCONF' | sudo tee /etc/mosquitto/conf.d/poolex.conf > /dev/null
+# Remplacer entièrement mosquitto.conf par une config minimale mosquitto 2.x
+# (évite tout conflit avec conf.d ou les valeurs par défaut Debian)
+sudo rm -f /etc/mosquitto/conf.d/*.conf
+sudo tee /etc/mosquitto/mosquitto.conf > /dev/null <<'MCONF'
+pid_file /run/mosquitto/mosquitto.pid
+persistence true
+persistence_location /var/lib/mosquitto/
+log_dest stderr
 listener 1883
 allow_anonymous false
 password_file /etc/mosquitto/passwd
 MCONF
 
 sudo systemctl restart mosquitto
-sudo systemctl is-active mosquitto || { journalctl -u mosquitto -n 20 --no-pager; exit 1; }
+sudo systemctl is-active mosquitto || { sudo journalctl -u mosquitto -n 20 --no-pager; exit 1; }
 
 echo ""
 echo "  *** MOT DE PASSE MQTT GÉNÉRÉ — À COPIER DANS GITHUB SECRETS ***"
