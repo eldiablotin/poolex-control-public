@@ -86,8 +86,7 @@ find "$REPO_DIR" -maxdepth 1 -mindepth 1 ! -name '.git' \
 # 6. Service systemd
 echo ""
 echo "[6/7] Installation du service systemd..."
-sed "s/__SERVICE_USER__/$SERVICE_USER/" "$REPO_DIR/scripts/poolex.service" \
-    | sudo tee /etc/systemd/system/poolex.service > /dev/null
+sudo cp "$REPO_DIR/scripts/poolex.service" /etc/systemd/system/poolex.service
 sudo systemctl daemon-reload
 sudo systemctl enable poolex
 

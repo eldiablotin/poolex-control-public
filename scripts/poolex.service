@@ -1,10 +1,11 @@
 [Unit]
 Description=Poolex Heat Pump RS485 Control
 After=network.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-User=__SERVICE_USER__
+User=pi
 WorkingDirectory=/opt/poolex-control
 Environment="POOLEX_SERIAL_PORT=/dev/ttyUSB0"
 Environment="POOLEX_DB_PATH=/var/lib/poolex/poolex.db"
@@ -17,7 +18,6 @@ EnvironmentFile=-/opt/poolex-control/poolex.env
 ExecStart=/opt/poolex-control/venv/bin/python -m poolex
 Restart=on-failure
 RestartSec=15s
-StartLimitIntervalSec=0
 StandardOutput=journal
 StandardError=journal
 
