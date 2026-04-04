@@ -105,10 +105,10 @@ class RS485Capture:
         # Attendre la fin physique de la transmission
         # 10 bits/octet (8N1 + start + stop) à 9600 baud ≈ 1.04 ms/octet
         tx_duration = len(data) * 10 / self.baudrate
-        time.sleep(tx_duration + 0.01)  # +10 ms de marge
+        time.sleep(tx_duration + 0.005)  # +5 ms de marge
 
-        # Vider l'écho éventuel (half-duplex)
-        self._serial.reset_input_buffer()
+        # Ne pas vider le buffer RX : l'écho half-duplex est capturé
+        # par le read_loop comme confirmation d'envoi.
 
     # ------------------------------------------------------------------ #
     #  Boucle de lecture                                                   #

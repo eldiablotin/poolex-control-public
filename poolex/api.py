@@ -40,7 +40,7 @@ def _on_frame(frame):
     storage.save(frame)
 
 capture    = RS485Capture(port=SERIAL_PORT, on_frame=_on_frame)
-controller = Controller(capture, storage=storage)   # charge templates D2/CC depuis DB si télécommande absente
+controller = Controller(capture, storage=storage)   # réactif sur D2 de la PAC, commande via CD
 
 
 # ---------------------------------------------------------------------------
