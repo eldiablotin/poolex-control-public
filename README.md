@@ -668,3 +668,145 @@ chmod 440 /etc/sudoers.d/poolex
 ```
 
 > ⚠️ Ne jamais mettre `user:group` dans sudoers — le `:` est réservé.
+
+
+# ENGLISH VERSION
+# Poolex Control
+
+Full control of a swimming pool heat pump via its RS485 bus, using a Raspberry Pi 4 and a USB-RS485 adapter.
+
+---
+
+## Table of Contents
+
+1. [Required Hardware](#1-required-hardware)
+2. [RS485 Protocol — Full Model](#2-rs485-protocol--full-model)
+3. [Reverse Engineering Methodology](#3-reverse-engineering-methodology)
+4. [Software Architecture](#4-software-architecture)
+5. [Installation on Raspberry Pi](#5-installation-on-raspberry-pi)
+6. [MQTT and Home Assistant Integration](#6-mqtt-and-home-assistant-integration)
+7. [Setting Up GitHub Actions](#7-setting-up-github-actions)
+8. [Using the API](#8-using-the-api)
+9. [Troubleshooting](#9-troubleshooting)
+
+---
+
+## 1. Required Hardware
+
+| Component | Model | Notes |
+|-----------|-------|-------|
+| Single-board computer | Raspberry Pi 4 Rev B | Debian 13 (Trixie), 64-bit |
+| USB-RS485 adapter | Waveshare USB to RS232/485 | FTDI FT232RNL chip |
+| USB cable | USB-A → USB-A (provided) | |
+| Access to RS485 bus | A+/B- terminals of the heat pump | In parallel with the wired remote control |
+
+### Wiring
+
+```
+Waveshare Adapter          Heat Pump RS485 Bus
+────────────────────          ─────────────────
+TX_A  ─────────────────────►  A+ Terminal
+RX_B  ◄─────────────────────  B- Terminal
+GND   ─────────────────────── Ground (optional)
+```
+
+**120Ω Switch:**
+- `OFF` if the wired remote control is present (parallel connection)
+- `ON` if the remote control is disconnected (RPi alone on the bus — termination required)
+
+> The Waveshare (FT232RNL) automatically handles DE/RE switching.
+> It **does not return local echo** during transmission: frames sent by the RPi do not appear in the receive stream.
+
+---
+
+## 2. RS485 Protocol — Full Model
+
+### Physical Parameters
+
+| Parameter | Value |
+|-----------|-------|
+| Baud rate | 9600 baud |
+| Format | 8N1 (8 bits, no parity, 1 stop) |
+| Frame size | **80 bytes fixed** |
+| Rate | ~1 frame/second
+
+---
+## 8. Using the API
+
+### GET /frames
+
+```bash
+curl http://raspberrypi4:5000/frames
+```
+
+### Filter by type
+```bash
+curl "http://raspberrypi4:5000/frames?header=DD&limit=10"
+```
+
+### GET /frames/stats
+
+```bash
+curl http://raspberrypi4:5000/frames/stats
+# {"CC": 2353, "CD": 235, "D2": 8668, "DD": 10475}
+```
+
+---
+## 9. Troubleshooting
+
+### /dev/ttyUSB0 missing or unstable
+
+```bash
+lsusb | grep -i ftdi            # Check USB detection
+dmesg | grep -E "ttyUSB|ftdi"   # View kernel events
+
+# If ttyUSB0 appears then disappears immediately → brltty
+sudo apt remove --purge brltty -y
+# Unplug / replug the adapter
+```
+
+### No frames on the bus
+
+```bash
+# Raw read test
+timeout 5 cat /dev/ttyUSB0 | xxd | head -20
+```
+
+- No bytes → Check A+/B- wiring, 120Ω switch setting (ON if remote is disconnected)
+- Bytes present but invalid frames → Check 9600 baud, cable length
+
+### Service fails to start
+
+```bash
+journalctl -u poolex -n 30 --no-pager
+```
+
+| Error | Solution |
+|-------|----------|
+| `No such file: /dev/ttyUSB0` | Normal, automatic retry every 10s |
+| `Permission denied: /dev/ttyUSB0` | `sudo usermod -a -G dialout pi` + reconnect |
+| `ModuleNotFoundError` | `pip install -r /opt/poolex-control/requirements.txt` in the venv |
+
+### GitHub Actions runner fails to start
+
+```bash
+systemctl status runner-poolex
+journalctl -u runner-poolex -n 20
+```
+
+Common cause: service configured as `Type=oneshot` or `User=root`.
+The runner refuses to run as root — see [Section 6](#6-setting-up-github-actions).
+
+### sudo broken (sudoers syntax error)
+
+```bash
+su -                             # Switch to root without sudo
+rm /etc/sudoers.d/poolex
+printf 'pi ALL=(ALL) NOPASSWD: /usr/bin/systemctl daemon-reload\n' \
+       > /etc/sudoers.d/poolex
+printf 'pi ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart poolex\n' \
+       >> /etc/sudoers.d/poolex
+chmod 440 /etc/sudoers.d/poolex
+```
+
+> ⚠️ Never use `user:group` in sudoers — the `:` is reserved.
