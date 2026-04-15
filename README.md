@@ -1,4 +1,5 @@
 # Poolex Control
+# French version 
 
 Contrôle complet d'une pompe à chaleur de piscine via son bus RS485,
 en utilisant un Raspberry Pi 4 et un adaptateur USB-RS485.
@@ -728,19 +729,537 @@ GND   ─────────────────────── Grou
 | Baud rate | 9600 baud |
 | Format | 8N1 (8 bits, no parity, 1 stop) |
 | Frame size | **80 bytes fixed** |
-| Rate | ~1 frame/second
+| Rate | ~1 frame/second per type |
+
+### Frame Roles — Model Confirmed April 2026
+
+> ⚠️ Contrary to expectations, **the heat pump is the bus master**.
+> It broadcasts D2 with its current configuration.
+> The remote responds with CC (keepalive) and sends CD to issue commands.
+
+| Header | Hex | Sender | Frequency | Role |
+|--------|-----|--------|-----------|------|
+| `DD` | 0xDD | Heat Pump | ~1/s | Live status (temperatures, compressor state) |
+| `D2` | 0xD2 | **Heat Pump** | ~1/s | Current configuration broadcast (setpoint, mode, power) |
+| `CC` | 0xCC | Remote | ~1/s | Keepalive — mirror of D2, confirms reception |
+| `CD` | 0xCD | Remote | On command | Command: change setpoint, power, mode |
+
+### Checksum byte[79]
+
+All D2, CC, and CD frames have a **checksum in byte[79]**:
+
+```
+byte[79] = (sum(bytes[0..78]) + 0xAF) & 0xFF
+```
+
+> Any modified frame must recalculate this checksum. The heat pump silently rejects frames with an incorrect checksum.
+
+For DD, byte[79] is a rolling counter (not an application checksum).
+
+### DD Frame Decoding (Real-Time Status: Heat Pump → Remote)
+
+| Byte | Decoding | Example | Status |
+|------|----------|---------|--------|
+| `[0]` | Header = 0xDD | — | ✓ |
+| `[20]` | Outdoor air temperature = value ÷ 2 °C | 26 → 13.0°C | ✓ Apr 2026 |
+| `[29]` | Pool water temperature = value ÷ 10 °C | 114 → 11.4°C | ✓ Apr 2026 |
+| `[3]` | Compressor state (see table below) | 0xa1 → heating | ✓ Apr 2026 |
+| `[79]` | Rolling counter | — | ✓ |
+
+**DD byte[3] Values:**
+
+| Value | Hex | Meaning |
+|-------|-----|---------|
+| 161 | 0xa1 | Heating active |
+| 33 | 0x21 | Running / standby |
+| 32 | 0x20 | Stopping |
+| 0 | 0x00 | Off |
+
+### D2 Frame Decoding (Current Configuration: Heat Pump → Remote)
+
+The heat pump emits D2 at ~1/s with its internal configuration. When the RPi modifies a parameter (via CD), D2 updates to reflect the new state.
+
+| Byte | Decoding |
+|------|----------|
+| `[0]` | Header = 0xD2 |
+| `[1]` | State + mode (see modes table) |
+| `[4]` | Sub-mode (0x01 = normal, 0x02 = cooling) |
+| `[11]` | Setpoint temperature (°C) |
+| `[79]` | Checksum = (sum[0..78] + 0xAF) & 0xFF |
+
+### Heating Modes — byte[1] + byte[4]
+
+| byte[1] | byte[4] | Mode | bit 0 of byte[1] |
+|---------|---------|------|------------------|
+| 0x5B | 0x01 | **inverter** (on) | 1 = on |
+| 0x3B | 0x01 | **fix** (on) | 1 = on |
+| 0x1B | 0x01 | **sun** (on) | 1 = on |
+| 0x1B | 0x02 | **cooling** (on) | 1 = on |
+| 0x5A | 0x01 | inverter (off) | 0 = off |
+| 0x3A | 0x01 | fix (off) | 0 = off |
+| … | … | … | … |
+
+**Rule:** `byte[1] bit 0 = 1` → on, `bit 0 = 0` → off.
+Bits 1-7 encode the mode. Modes differ by steps of `0x20`.
+
+### CC Frame (Keepalive: Remote → Heat Pump)
+
+CC is an exact mirror of D2: same bytes [1..78], only the header changes.
+
+```
+CC[0]  = 0xCC  (instead of 0xD2)
+CC[79] = (sum(CC[0..78]) + 0xAF) & 0xFF
+```
+
+The heat pump expects to receive CC after each D2 (approximately 50–100 ms later).
+Without regular CC, the heat pump may consider the remote absent.
+
+### CD Frame (Command: Remote → Heat Pump)
+
+To modify the configuration, the remote sends CD with the new parameters.
+The RPi repeats CD on **~8 consecutive D2 cycles** to ensure reception.
+
+```
+CD[0]  = 0xCD
+CD[1]  = byte[1] with the desired mode and on/off bit
+CD[4]  = byte[4] of the desired mode (0x01 or 0x02)
+CD[11] = new setpoint (°C)
+CD[79] = (sum(CD[0..78]) + 0xAF) & 0xFF
+```
+
+> The heat pump updates its D2 broadcast as soon as it accepts a CD.
+> Monitor D2 byte[1] and byte[11] to confirm acceptance.
 
 ---
+---
+## 3. Reverse Engineering Methodology
+
+This section documents **how to analyze frames and test commands** with the wired remote control in place. This is the method used to establish the protocol described above.
+
+### General Principle
+
+The RS485 bus is a shared medium: everything that circulates is visible to all.
+By connecting the Waveshare adapter in parallel (120Ω switch OFF), you can passively observe all frames without disrupting the bus.
+
+The method is: **trigger a known action on the remote control** → **correlate** with the changes in bytes in the captured frames → **deduce the encoding**.
+
+### Step 1 — Passive Capture
+
+Stop the poolex service (frees the port), then start a capture in CSV:
+
+```bash
+sudo systemctl stop poolex
+
+nohup /opt/poolex-control/venv/bin/python3 -c "
+import sqlite3, time, sys
+sys.path.insert(0, '/opt/poolex-control')
+from poolex.capture import RS485Capture
+from poolex.decoder import Frame
+
+log = open('/tmp/capture.log', 'w')
+log.write('timestamp,header,b1,b4,b11,b79,raw\n')
+log.flush()
+
+def on_frame(f):
+    log.write(f'{time.time():.3f},{f.name},'
+              f'0x{f.raw[1]:02x},0x{f.raw[4]:02x},{f.raw[11]},'
+              f'0x{f.raw[79]:02x},{f.raw.hex()}\n')
+    log.flush()
+
+c = RS485Capture(port='/dev/ttyUSB0', on_frame=on_frame)
+c.start()
+time.sleep(300)   # 5 minutes
+c.stop()
+log.close()
+" > /tmp/capture.out 2>&1 &
+
+echo "Capture started (PID $!)"
+```
+
+Restart the service afterward:
+
+```bash
+sudo systemctl start poolex
+```
+
+### Step 2 — Trigger Actions and Correlate
+
+Perform actions on the wired remote control (change setpoint, mode, turn on/off) **one at a time**, noting the approximate time.
+
+After each action, check the captured CD frames:
+
+```bash
+# See all distinct CD frames by b[1] and b[11]
+grep ',CD,' /tmp/capture.log | cut -d',' -f1,3,4,5 | sort -u
+
+# See D2 transitions (reflects the heat pump's internal state)
+grep ',D2,' /tmp/capture.log | cut -d',' -f1,3,4,5 \
+  | awk -F',' '{ if ($2 != prev2 || $3 != prev3 || $4 != prev4)
+      { print; prev2=$2; prev3=$3; prev4=$4 } }'
+```
+
+### Step 3 — Analyze Variable Bytes
+
+To identify which byte changes during an action:
+
+```bash
+# Compare two hexadecimal frames (e.g., before/after mode change)
+a = bytes.fromhex("d25b0001012d...")
+b = bytes.fromhex("d23b0001012d...")
+diffs = [(i, f'0x{a[i]:02x}→0x{b[i]:02x}') for i in range(80) if a[i] != b[i]]
+print(diffs)
+```
+
+Or use the `/frames` endpoint to retrieve raw frames:
+
+```bash
+# Compare the last 2 D2 frames
+curl "http://raspberrypi4:5000/frames?header=D2&limit=2"
+```
+
+### Step 4 — Validate the Checksum
+
+Check that byte[79] matches the formula for captured CD frames:
+
+```bash
+raw = bytes.fromhex("cd5b0001...")
+expected = (sum(raw[:79]) + 0xAF) & 0xFF
+assert expected == raw[79], f"Checksum: expected 0x{expected:02x}, received 0x{raw[79]:02x}"
+```
+
+### Step 5 — Test a Command Live
+
+With the poolex service active (and the remote connected or not):
+
+```bash
+# Change the setpoint
+curl -X POST http://raspberrypi4:5000/control/setpoint \
+     -H "Content-Type: application/json" -d '{"temperature": 25}'
+
+# Monitor D2 to confirm the heat pump has accepted
+watch -n1 "curl -s http://raspberrypi4:5000/status | python3 -m json.tool"
+```
+
+The heat pump confirms by updating D2 byte[11]. A change not taken into account indicates an incorrect checksum or inappropriate bus timing.
+
+### Important Rules for Analysis
+
+| Rule | Explanation |
+|------|-------------|
+| Modify **one parameter at a time** | Otherwise, correlation is impossible |
+| **Always note the time** of each action | Log timestamps allow filtering |
+| Monitor **D2 in return** after a command | The heat pump confirms by updating its D2 |
+| The Waveshare **does not echo** in RX | Frames sent by the RPi do not return in the log |
+| The poolex service and manual capture **cannot coexist** on the same port | Stop one before starting the other |
+| byte[79] must always be **recalculated** after modification | `(sum(bytes[0..78]) + 0xAF) & 0xFF` |
+
+### Coexistence of Wired Remote + RPi
+
+The wired remote and the RPi **can coexist on the bus** simultaneously.
+The RPi sends CC (keepalive) and CD (commands), and the remote does the same.
+The RPi reads D2 from the heat pump and updates its internal state — the remote remains usable to observe the effect of RPi commands on the display.
+
+For clean captures (without RPi's CC/CD interference):
+
+```bash
+sudo systemctl stop poolex
+# ... manual capture ...
+sudo systemctl start poolex
+```
+
+---
+---
+## 4. Software Architecture
+
+```
+poolex-control/
+├── poolex/
+│   ├── decoder.py       # Frame decoding (Frame, DDFrame, CDFrame, diff)
+│   ├── capture.py       # Serial reading in thread, retry if port is missing
+│   ├── storage.py       # SQLite storage (BLOB schema, 1 row per frame)
+│   ├── controller.py    # Reactive protocol: CC keepalive + CD commands
+│   ├── mqtt.py          # MQTT client + Home Assistant autodiscovery
+│   ├── api.py           # Flask REST API
+│   ├── analyzer.py      # Interactive CLI tool for reverse engineering
+│   └── test_protocol.py # Flask blueprint for guided reverse engineering testing
+├── tests/
+│   ├── test_decoder.py
+│   └── test_controller.py
+├── scripts/
+│   ├── install.sh       # Initial installation on RPi
+│   └── poolex.service   # Systemd unit
+└── .github/workflows/
+    ├── ci.yml           # Lint + tests (ubuntu-latest)
+    └── deploy.yml       # Automatic deployment (self-hosted runner RPi)
+```
+
+### Data Flow
+
+```
+RS485 Bus
+   │
+   ├─── Heat Pump sends DD (~1/s) ────────────────────► capture.py
+   ├─── Heat Pump sends D2 (~1/s) ────────────────────► capture.py
+   │                                              │
+   │                                       storage.py → SQLite
+   │                                              │
+   │                                       controller.py
+   │                                       ├─ reads D2 → updates internal state
+   │                                       ├─ sends CC (~50ms after D2)
+   │                                       └─ sends CD (on API command)
+   │
+   ◄─── RPi sends CC ──────────────────────────── controller.py
+   ◄─── RPi sends CD (commands) ──────────────── controller.py
+
+api.py (Flask :5000)
+   ├── GET  /status          → current state (temperatures, setpoint, power, mode)
+   ├── GET  /frames          → recent raw frames
+   ├── GET  /frames/stats    → count by type
+   ├── POST /control/setpoint → CD with new byte[11]
+   ├── POST /control/power    → CD with byte[1] bit 0 modified
+   └── POST /control/mode     → CD with byte[1] + byte[4] of desired mode
+```
+
+### Controller Logic
+
+```
+Startup
+   │
+   ├─ Load D2 template from SQLite (last known D2)
+   │  → controller_ready = True immediately (no need for bus at startup)
+   │
+   └─ Loop: wait for D2 from the heat pump
+         │
+         ├─ Update template (setpoint, mode, power reflecting the heat pump)
+         ├─ 50ms later → send CC (mirror of D2, checksum recalculated)
+         └─ If command pending → send CD (8 cycles for reliability)
+                                     → cancel after 8 cycles
+```
+
+---
+---
+## 5. Installation on Raspberry Pi
+
+### Prerequisites
+
+- Raspberry Pi OS or Debian ≥ 12 (64-bit)
+- Python ≥ 3.11
+- SSH access and `sudo`
+
+### Step 1 — Clone and Install
+
+```bash
+git clone https://github.com/eldiablotin/poolex-control.git
+cd poolex-control
+bash scripts/install.sh
+```
+
+The script automatically performs:
+
+| Step | Action |
+|------|--------|
+| 1 | Install system packages (`python3-venv`, `git`, `mosquitto`) |
+| 2 | Create Mosquitto broker with a dedicated `poolex` user + password generation |
+| 3 | Add user to `dialout` group (access `/dev/ttyUSB0`) |
+| 4 | Create `/opt/poolex-control/` and `/var/lib/poolex/` |
+| 5 | Python virtualenv + install dependencies |
+| 6 | Install and enable `poolex` systemd service |
+| 7 | Sudoers rule (restart without password for CI runner) |
+
+At the end of the script, **the generated MQTT password is displayed**. It must be added as a GitHub secret (`POOLEX_MQTT_PASSWORD`) for the deploy to inject it automatically.
+
+> ⚠️ Log out and log back in via SSH after installation (to apply `dialout` group).
+
+### Step 2 — Verify
+
+```bash
+# USB-RS485 port
+ls /dev/ttyUSB*              # → /dev/ttyUSB0
+
+# Service
+systemctl status poolex
+curl http://localhost:5000/status
+```
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `POOLEX_SERIAL_PORT` | `/dev/ttyUSB0` | Serial port |
+| `POOLEX_DB_PATH` | `/var/lib/poolex/poolex.db` | Database |
+| `POOLEX_API_PORT` | `5000` | API port |
+| `POOLEX_MQTT_HOST` | `localhost` | MQTT broker |
+| `POOLEX_MQTT_PORT` | `1883` | MQTT port |
+| `POOLEX_MQTT_USER` | `poolex` | MQTT user |
+| `POOLEX_MQTT_PASSWORD` | _(secret)_ | MQTT password — via `poolex.env` |
+| `POOLEX_MQTT_PREFIX` | `poolex` | Topic prefix |
+
+---
+---
+## 6. MQTT and Home Assistant Integration
+
+### MQTT Broker
+
+The `install.sh` script installs **Mosquitto** on the RPi and creates a dedicated `poolex` user.
+If you use an existing broker (e.g., the Home Assistant Mosquitto add-on), configure the environment variables accordingly.
+
+### Published Topics (~every 15s and after each command)
+
+| Topic | Content |
+|-------|---------|
+| `poolex/status` | Full JSON (water_temp, air_temp, setpoint, power, mode, controller_ready) |
+| `poolex/water_temp` | Pool water temperature (°C) |
+| `poolex/air_temp` | Outdoor air temperature (°C) |
+| `poolex/setpoint` | Current setpoint (°C) |
+| `poolex/power` | `on` or `off` |
+| `poolex/mode` | `inverter`, `fix`, `sun`, or `cooling` |
+
+### Command Topics (Subscribe)
+
+| Topic | Expected Value |
+|-------|----------------|
+| `poolex/control/setpoint` | Integer between 8 and 40 |
+| `poolex/control/power` | `on` or `off` |
+| `poolex/control/mode` | `inverter`, `fix`, `sun`, or `cooling` |
+
+### Home Assistant — Autodiscovery
+
+At startup, the service automatically publishes MQTT discovery payloads.
+Home Assistant creates the following entities without manual configuration:
+
+| Entity | HA Type | Functionality |
+|--------|---------|---------------|
+| Poolex PAC | `climate` | On/off + setpoint (8–40°C) + current temperature |
+| Poolex PAC Mode | `select` | Mode selection: inverter / fix / sun / cooling |
+| Poolex PAC Water Temperature | `sensor` | Pool water temperature (°C) |
+| Poolex PAC Air Temperature | `sensor` | Outdoor air temperature (°C) |
+
+### Configuration with Home Assistant Mosquitto Add-on
+
+If Home Assistant uses its own Mosquitto broker (add-on), configure poolex-control to connect to it instead of the local broker:
+
+1. In HA → Settings → People → create a user `poolex` with a password
+2. In `scripts/poolex.service`, set `POOLEX_MQTT_HOST=<HA IP>`
+3. Update the GitHub secret `POOLEX_MQTT_PASSWORD` with this password
+4. The existing MQTT integration in HA will automatically discover the entities
+
+---
+---
+## 7. Setting Up GitHub Actions
+
+Two workflows are provided:
+
+| Workflow | Trigger | Runner | Role |
+|----------|---------|--------|------|
+| `ci.yml` | Any push | `ubuntu-latest` (GitHub) | Ruff lint + pytest tests |
+| `deploy.yml` | Push to `main` | Self-hosted (RPi) | Automatic deployment |
+
+The CI works without configuration. Deployment requires a self-hosted runner on the RPi.
+
+### Required GitHub Secrets
+
+| Secret | Description |
+|--------|-------------|
+| `GH_PAT` | Personal Access Token with `repo` scope (for self-hosted checkout) |
+| `POOLEX_MQTT_PASSWORD` | MQTT password — generated by `install.sh` |
+
+### Install the Self-Hosted Runner on the RPi
+
+On GitHub → repo → Settings → Actions → Runners → **New self-hosted runner** (Linux / ARM64).
+
+On the RPi (as `pi`, **never root**):
+
+```bash
+mkdir -p ~/actions-runner && cd ~/actions-runner
+curl -o runner.tar.gz -L \
+  https://github.com/actions/runner/releases/latest/download/actions-runner-linux-arm64.tar.gz
+tar xzf runner.tar.gz
+./config.sh --url https://github.com/<you>/<repo> --token <TOKEN>
+
+# Install and activate as a systemd service
+sudo ./svc.sh install pi
+sudo ./svc.sh start
+```
+
+> `concurrency: cancel-in-progress: true` in `deploy.yml` cancels pending jobs if a new push arrives — prevents an outdated deployment from overwriting a newer version.
+
+### Manual Deployment (Without CI/CD)
+
+```bash
+# On the RPi
+cd ~/poolex-control
+git pull
+find . -maxdepth 1 -mindepth 1 ! -name '.git' -exec cp -r {} /opt/poolex-control/ \;
+/opt/poolex-control/venv/bin/pip install -r /opt/poolex-control/requirements.txt -q
+sudo systemctl restart poolex
+```
+
+---
+---
 ## 8. Using the API
+
+The API listens on `0.0.0.0:5000`.
+
+### GET /status
+
+```bash
+curl http://raspberrypi4:5000/status
+```
+
+```json
+{
+  "water_temp": 11.7,
+  "air_temp": 16.5,
+  "pac_mode": 161,
+  "setpoint": 26,
+  "power": true,
+  "mode": "inverter",
+  "controller_ready": true
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `water_temp` | Pool water temperature (°C) — DD byte[29] ÷ 10 |
+| `air_temp` | Outdoor air temperature (°C) — DD byte[20] ÷ 2 |
+| `pac_mode` | Raw compressor state — DD byte[3] (161=heating, 33=running, 0=off) |
+| `setpoint` | Current setpoint (°C) — reflects the heat pump's D2 |
+| `power` | On/off state — D2 byte[1] bit 0 |
+| `mode` | Heating mode — inverter / fix / sun / cooling |
+| `controller_ready` | `true` if a D2 template is available |
+
+### POST /control/setpoint
+
+```bash
+curl -X POST http://raspberrypi4:5000/control/setpoint \
+     -H "Content-Type: application/json" \
+     -d '{"temperature": 28}'
+```
+Range: 8–40°C. The heat pump confirms by updating D2 byte[11].
+
+### POST /control/power
+
+```bash
+curl -X POST http://raspberrypi4:5000/control/power \
+     -H "Content-Type: application/json" \
+     -d '{"state": "off"}'   # or "on"
+```
+
+### POST /control/mode
+
+```bash
+curl -X POST http://raspberrypi4:5000/control/mode \
+     -H "Content-Type: application/json" \
+     -d '{"mode": "fix"}'    # inverter | fix | sun | cooling
+```
 
 ### GET /frames
 
 ```bash
+# Last 20 frames
 curl http://raspberrypi4:5000/frames
-```
 
-### Filter by type
-```bash
+# Filter by type
 curl "http://raspberrypi4:5000/frames?header=DD&limit=10"
 ```
 
@@ -752,9 +1271,10 @@ curl http://raspberrypi4:5000/frames/stats
 ```
 
 ---
+---
 ## 9. Troubleshooting
 
-### /dev/ttyUSB0 missing or unstable
+### /dev/ttyUSB0 Missing or Unstable
 
 ```bash
 lsusb | grep -i ftdi            # Check USB detection
@@ -765,7 +1285,7 @@ sudo apt remove --purge brltty -y
 # Unplug / replug the adapter
 ```
 
-### No frames on the bus
+### No Frames on the Bus
 
 ```bash
 # Raw read test
@@ -775,7 +1295,7 @@ timeout 5 cat /dev/ttyUSB0 | xxd | head -20
 - No bytes → Check A+/B- wiring, 120Ω switch setting (ON if remote is disconnected)
 - Bytes present but invalid frames → Check 9600 baud, cable length
 
-### Service fails to start
+### Service Fails to Start
 
 ```bash
 journalctl -u poolex -n 30 --no-pager
@@ -787,7 +1307,7 @@ journalctl -u poolex -n 30 --no-pager
 | `Permission denied: /dev/ttyUSB0` | `sudo usermod -a -G dialout pi` + reconnect |
 | `ModuleNotFoundError` | `pip install -r /opt/poolex-control/requirements.txt` in the venv |
 
-### GitHub Actions runner fails to start
+### GitHub Actions Runner Fails to Start
 
 ```bash
 systemctl status runner-poolex
@@ -795,9 +1315,9 @@ journalctl -u runner-poolex -n 20
 ```
 
 Common cause: service configured as `Type=oneshot` or `User=root`.
-The runner refuses to run as root — see [Section 6](#6-setting-up-github-actions).
+The runner refuses to run as root — see [Section 6](#6-mqtt-and-home-assistant-integration).
 
-### sudo broken (sudoers syntax error)
+### sudo Broken (sudoers Syntax Error)
 
 ```bash
 su -                             # Switch to root without sudo
