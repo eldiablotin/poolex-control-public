@@ -1,8 +1,13 @@
 # Poolex Control
-# French version 
-
 Contrôle complet d'une pompe à chaleur de piscine via son bus RS485,
-en utilisant un Raspberry Pi 4 et un adaptateur USB-RS485.
+en utilisant un Raspberry Pi 4 et un adaptateur USB-RS485.Processus de reverse engeneering et CI/CD
+
+Full control of a  pool heat pump via its RS485 bus, using a Raspberry Pi 4 and a USB-RS485 adapter, including reverse engeneering process, CI/CD
+
+
+[English Version Here](#1-required-hardware)
+
+## French version 
 
 ---
 
@@ -672,6 +677,7 @@ chmod 440 /etc/sudoers.d/poolex
 
 
 # ENGLISH VERSION
+
 # Poolex Control
 
 Full control of a swimming pool heat pump via its RS485 bus, using a Raspberry Pi 4 and a USB-RS485 adapter.
